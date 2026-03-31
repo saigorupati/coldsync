@@ -15,7 +15,7 @@ class LadderScanner:
 
     async def scan(self) -> dict[str, list[dict]]:
         now = datetime.now(timezone.utc)
-        dates = [(now + timedelta(days=d)).date() for d in range(0, 4)]
+        dates = [(now + timedelta(days=d)).date() for d in range(0, 2)]
         active_cities = get_active_cities(self.config)
 
         ladders = {}
