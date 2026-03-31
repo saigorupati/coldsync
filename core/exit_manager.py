@@ -125,7 +125,7 @@ class ExitManager:
             await self._execute_exit(pos, 1.0, 3, "full_exit_30pct", current_no_price)
         elif loss_pct >= 0.20 and pos.exit_stage < 2:
             await self._execute_exit(pos, self.config.exit_down_20_cut_pct, 2, "cut_heavy_20pct", current_no_price)
-        elif loss_pct >= 0.10 and pos.exit_stage < 1:
+        elif loss_pct >= 0.10 and pos.exit_stage < 1 and self.config.exit_down_10_cut_pct > 0:
             await self._execute_exit(pos, self.config.exit_down_10_cut_pct, 1, "cut_some_10pct", current_no_price)
 
     async def _execute_exit(self, pos: MonitoredPosition, cut_fraction: float,

@@ -62,8 +62,8 @@ class StrategyConfig:
     min_order_size: float = 5.0
 
     # --- Exit / Scale-out parameters (replaces hedge) ---
-    exit_down_10_cut_pct: float = 0.33       # sell 33% of position at -10%
-    exit_down_20_cut_pct: float = 0.66       # sell 66% of remaining at -20%
+    exit_down_10_cut_pct: float = 0.0        # disabled — too sensitive for 90c+ NO contracts
+    exit_down_20_cut_pct: float = 0.50       # sell 50% of position at -20%
     exit_down_30_full_exit: bool = True       # fully exit at -30%
     exit_check_interval_seconds: float = 5.0  # polling fallback when WS down
 
