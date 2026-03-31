@@ -25,7 +25,7 @@ logger = logging.getLogger("coldsync.kalshi")
 DEMO_BASE_URL = "https://demo-api.kalshi.co/trade-api/v2"
 PROD_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 REQUEST_TIMEOUT = 20
-MIN_REQUEST_INTERVAL = 0.06  # ~16 req/s, under 20 read/s limit
+MIN_REQUEST_INTERVAL = 0.12  # ~8 req/s, comfortably under 10 req/s prod limit
 KALSHI_MARKET_TZ = ZoneInfo("America/New_York")
 
 
@@ -75,11 +75,26 @@ class KalshiClient:
         self._private_key = self._load_private_key(private_key_pem)
         self._last_request_time = 0.0
         self._http = httpx.AsyncClient(timeout=REQUEST_TIMEOUT)
+        self._semaphore = asyncio.Semaphore(5)  # max 5 concurrent requests
 
-    def _load_private_key(self, pem: str):
-        if not pem or pem == "PLACEHOLDER_PEM":
+    def _load_private_key(self, pem_or_path: str):
+        if not pem_or_path or pem_or_path == "PLACEHOLDER_PEM":
             logger.warning("No Kalshi private key configured — running in read-only mode")
             return None
+
+        # If it looks like a file path, read from disk
+        import os
+        if os.path.isfile(pem_or_path):
+            try:
+                with open(pem_or_path, "r") as f:
+                    pem = f.read()
+                logger.info("Loaded private key from file: %s", pem_or_path)
+            except Exception as e:
+                logger.error("Failed to read key file %s: %s", pem_or_path, e)
+                return None
+        else:
+            pem = pem_or_path
+
         pem = pem.replace("\\n", "\n")
         if not pem.strip().startswith("-----"):
             logger.warning("Invalid PEM format for private key")
@@ -120,42 +135,45 @@ class KalshiClient:
         self._last_request_time = time.time()
 
     async def _get(self, path: str, params: dict | None = None) -> dict:
-        url = self.base_url + path
-        headers = {"Content-Type": "application/json"}
-        headers.update(self._sign_request("GET", path))
+        async with self._semaphore:
+            url = self.base_url + path
+            headers = {"Content-Type": "application/json"}
+            headers.update(self._sign_request("GET", path))
 
-        for attempt in range(3):
-            await self._rate_limit()
-            resp = await self._http.get(url, headers=headers, params=params)
-            if resp.status_code != 429:
-                resp.raise_for_status()
-                return resp.json()
+            for attempt in range(3):
+                await self._rate_limit()
+                resp = await self._http.get(url, headers=headers, params=params)
+                if resp.status_code != 429:
+                    resp.raise_for_status()
+                    return resp.json()
 
-            retry_after = resp.headers.get("Retry-After")
-            delay = float(retry_after) if retry_after else (0.5 * (2 ** attempt))
-            logger.warning("Rate limit on %s; retrying in %.1fs", path, delay)
-            await asyncio.sleep(delay)
+                retry_after = resp.headers.get("Retry-After")
+                delay = float(retry_after) if retry_after else (1.0 * (2 ** attempt))
+                logger.warning("Rate limit on %s; retrying in %.1fs", path, delay)
+                await asyncio.sleep(delay)
 
-        resp.raise_for_status()
+            resp.raise_for_status()
         return resp.json()
 
     async def _post(self, path: str, body: dict) -> dict:
-        await self._rate_limit()
-        url = self.base_url + path
-        headers = {"Content-Type": "application/json"}
-        headers.update(self._sign_request("POST", path))
-        resp = await self._http.post(url, headers=headers, json=body)
-        resp.raise_for_status()
-        return resp.json()
+        async with self._semaphore:
+            await self._rate_limit()
+            url = self.base_url + path
+            headers = {"Content-Type": "application/json"}
+            headers.update(self._sign_request("POST", path))
+            resp = await self._http.post(url, headers=headers, json=body)
+            resp.raise_for_status()
+            return resp.json()
 
     async def _delete(self, path: str) -> dict:
-        await self._rate_limit()
-        url = self.base_url + path
-        headers = {"Content-Type": "application/json"}
-        headers.update(self._sign_request("DELETE", path))
-        resp = await self._http.delete(url, headers=headers)
-        resp.raise_for_status()
-        return resp.json() if resp.content else {}
+        async with self._semaphore:
+            await self._rate_limit()
+            url = self.base_url + path
+            headers = {"Content-Type": "application/json"}
+            headers.update(self._sign_request("DELETE", path))
+            resp = await self._http.delete(url, headers=headers)
+            resp.raise_for_status()
+            return resp.json() if resp.content else {}
 
     # ------------------------------------------------------------------
     # Market discovery
