@@ -40,10 +40,10 @@ class OrderExecutor:
         if market["spread"] > self.config.max_spread:
             return {"status": "skipped", "reason": "spread too wide"}
 
-        # Calculate order: buying NO means yes_price_cents is low
-        # NO price = 1 - yes_price, so yes_price_cents = 100 - no_price_cents
+        # Calculate order: buying NO at no_ask price
         no_price_cents = int(no_ask * 100)
-        yes_price_cents = 100 - no_price_cents
+        if no_price_cents < 1 or no_price_cents > 99:
+            return {"status": "skipped", "reason": f"no_price_cents {no_price_cents} out of range"}
         count = max(1, int(size_usd / no_ask))
 
         if self.config.dry_run:
@@ -58,7 +58,8 @@ class OrderExecutor:
                 side="no",
                 action="buy",
                 count=count,
-                yes_price_cents=yes_price_cents,
+                no_price_cents=no_price_cents,
+                time_in_force="immediate_or_cancel",
                 client_order_id=client_order_id,
             )
         except Exception as e:
@@ -70,19 +71,22 @@ class OrderExecutor:
             self._no_liquidity_cache[ticker] = time.time()
             return {"status": "error", "reason": "place_order returned None"}
 
-        order = result.get("order", {})
-        order_id = order.get("order_id", "")
-        status = order.get("status", "unknown")
+        # Parse response using proper API fields
+        parsed = KalshiClient.parse_order_response(result)
+        order_id = parsed["order_id"]
+        status = parsed["status"]
+        filled_count = parsed["fill_count"]
 
-        # Kalshi returns fill info in the order response
-        filled_count = int(order.get("count", 0)) if status == "executed" else 0
-        if status == "resting":
-            filled_count = 0  # resting means not yet filled
-        elif status in ("executed", "filled"):
-            filled_count = count  # fully filled
+        # Actual fill cost from API (taker + maker costs)
+        fill_cost = parsed["taker_fill_cost"] + parsed["maker_fill_cost"]
+        total_fees = parsed["taker_fees"] + parsed["maker_fees"]
 
-        fill_cost = filled_count * no_ask
+        # Fallback: estimate cost if API didn't return it
+        if fill_cost == 0 and filled_count > 0:
+            fill_cost = filled_count * no_ask
+
         final_status = "matched" if filled_count > 0 else status
+        actual_fill_price = fill_cost / filled_count if filled_count > 0 else no_ask
 
         trade = {
             "ticker": ticker,
@@ -90,7 +94,7 @@ class OrderExecutor:
             "side": "no",
             "action": "buy",
             "intended_price": no_ask,
-            "fill_price": no_ask,
+            "fill_price": actual_fill_price,
             "count": filled_count,
             "cost_usd": fill_cost,
             "status": final_status,
@@ -108,32 +112,23 @@ class OrderExecutor:
                 "question": market.get("question", ""),
                 "no_contracts": filled_count,
                 "no_cost": fill_cost,
-                "entry_price_no": no_ask,
+                "entry_price_no": actual_fill_price,
                 "city_date": market.get("city_date", ""),
                 "close_time": market.get("close_time"),
             })
             await self.tg.send_trade_alert(trade)
-        elif final_status == "resting":
-            # Track as open order
-            await self.db.insert_open_order({
-                "order_id": order_id,
-                "ticker": ticker,
-                "side": "no",
-                "order_type": f"no_buy_tier_{tier}",
-                "price": no_ask,
-                "count": count,
-                "question": market.get("question", ""),
-                "city_date": market.get("city_date", ""),
-                "close_time": market.get("close_time"),
-            })
-            await self.tg.send_trade_alert({**trade, "note": f"Resting @ {no_ask*100:.0f}c"})
+            if total_fees > 0:
+                logger.info("Fees on %s: $%.4f", ticker, total_fees)
         else:
+            # IOC order got no fill
             self._no_liquidity_cache[ticker] = time.time()
+            logger.info("IOC no fill for %s (status=%s)", ticker, status)
 
         return trade
 
     async def _place_no_limit_order(self, market: dict, size_usd: float,
                                      tier: str, bid_price: float) -> dict:
+        """Place a resting NO limit order (GTC) below the ask."""
         ticker = market["ticker"]
 
         existing = await self.db.get_open_order_for_market(ticker, "no")
@@ -141,9 +136,8 @@ class OrderExecutor:
             return {"status": "skipped", "reason": "No limit order already resting"}
 
         no_price_cents = int(bid_price * 100)
-        yes_price_cents = 100 - no_price_cents
-        if yes_price_cents < 1 or yes_price_cents > 99:
-            return {"status": "skipped", "reason": f"price out of range"}
+        if no_price_cents < 1 or no_price_cents > 99:
+            return {"status": "skipped", "reason": f"no_price_cents {no_price_cents} out of range"}
 
         count = max(1, int(size_usd / bid_price))
 
@@ -159,7 +153,8 @@ class OrderExecutor:
                 side="no",
                 action="buy",
                 count=count,
-                yes_price_cents=yes_price_cents,
+                no_price_cents=no_price_cents,
+                # No time_in_force → defaults to GTC for resting limit orders
                 client_order_id=client_order_id,
             )
         except Exception as e:
@@ -169,20 +164,41 @@ class OrderExecutor:
         if result is None:
             return {"status": "error", "reason": "place_order returned None"}
 
-        order = result.get("order", {})
-        order_id = order.get("order_id", "")
+        parsed = KalshiClient.parse_order_response(result)
+        order_id = parsed["order_id"]
+        status = parsed["status"]
 
-        await self.db.insert_open_order({
-            "order_id": order_id,
-            "ticker": ticker,
-            "side": "no",
-            "order_type": f"no_limit_tier_{tier}",
-            "price": bid_price,
-            "count": count,
-            "question": market.get("question", ""),
-            "city_date": market.get("city_date", ""),
-            "close_time": market.get("close_time"),
-        })
+        # Even a limit order might partially fill immediately
+        filled_count = parsed["fill_count"]
+        fill_cost = parsed["taker_fill_cost"] + parsed["maker_fill_cost"]
+        remaining = parsed["remaining_count"]
+
+        if filled_count > 0:
+            actual_fill_price = fill_cost / filled_count if fill_cost > 0 else bid_price
+            await self.db.upsert_position({
+                "ticker": ticker,
+                "event_ticker": market.get("event_ticker", ""),
+                "question": market.get("question", ""),
+                "no_contracts": filled_count,
+                "no_cost": fill_cost if fill_cost > 0 else filled_count * bid_price,
+                "entry_price_no": actual_fill_price,
+                "city_date": market.get("city_date", ""),
+                "close_time": market.get("close_time"),
+            })
+
+        # If there's a remaining resting portion, track it
+        if remaining > 0 and status == "resting":
+            await self.db.insert_open_order({
+                "order_id": order_id,
+                "ticker": ticker,
+                "side": "no",
+                "order_type": f"no_limit_tier_{tier}",
+                "price": bid_price,
+                "count": remaining,
+                "question": market.get("question", ""),
+                "city_date": market.get("city_date", ""),
+                "close_time": market.get("close_time"),
+            })
 
         trade = {
             "ticker": ticker,
@@ -190,19 +206,24 @@ class OrderExecutor:
             "side": "no",
             "action": "buy",
             "intended_price": bid_price,
-            "count": 0,
-            "cost_usd": 0,
-            "status": "resting",
+            "fill_price": (fill_cost / filled_count) if filled_count > 0 and fill_cost > 0 else None,
+            "count": filled_count,
+            "cost_usd": fill_cost,
+            "status": "matched" if filled_count > 0 and remaining == 0 else
+                      "partial" if filled_count > 0 and remaining > 0 else "resting",
             "question": market.get("question", ""),
             "close_time": market.get("close_time"),
             "city_date": market.get("city_date", ""),
             "order_id": order_id,
         }
         await self.db.log_trade(trade)
-        await self.tg.send_trade_alert({**trade, "note": f"No limit resting @ {bid_price*100:.0f}c"})
+
+        note = f"Filled {filled_count}, resting {remaining}" if filled_count > 0 else f"Resting {remaining} @ {bid_price*100:.0f}c"
+        await self.tg.send_trade_alert({**trade, "note": note})
         return trade
 
     async def poll_open_orders(self) -> list[dict]:
+        """Poll resting orders for fills using proper API response fields."""
         open_orders = await self.db.get_open_orders()
         if not open_orders:
             return []
@@ -219,11 +240,16 @@ class OrderExecutor:
             if result is None:
                 continue
 
-            api_status = (result.get("status", "") or "").lower()
-            filled_count = int(result.get("count", 0)) if api_status in ("executed", "filled") else 0
+            # Parse using the proper response fields
+            # get_order_status returns the order dict directly (already unwrapped)
+            parsed = KalshiClient.parse_order_response({"order": result})
+            api_status = parsed["status"]
+            filled_count = parsed["fill_count"]
+            fill_cost = parsed["taker_fill_cost"] + parsed["maker_fill_cost"]
 
-            if api_status in ("executed", "filled") or filled_count > 0:
-                fill_cost = filled_count * float(oo["price"])
+            if filled_count > 0 and api_status == "executed":
+                actual_price = fill_cost / filled_count if fill_cost > 0 else float(oo["price"])
+
                 await self.db.update_open_order(order_id, "filled", filled_count)
 
                 await self.db.upsert_position({
@@ -231,8 +257,8 @@ class OrderExecutor:
                     "event_ticker": "",
                     "question": oo.get("question"),
                     "no_contracts": filled_count,
-                    "no_cost": fill_cost,
-                    "entry_price_no": float(oo["price"]),
+                    "no_cost": fill_cost if fill_cost > 0 else filled_count * float(oo["price"]),
+                    "entry_price_no": actual_price,
                     "city_date": oo.get("city_date", ""),
                     "close_time": oo.get("close_time"),
                 })
@@ -243,8 +269,9 @@ class OrderExecutor:
                     "side": "no",
                     "action": "buy",
                     "intended_price": float(oo["price"]),
+                    "fill_price": actual_price,
                     "count": filled_count,
-                    "cost_usd": fill_cost,
+                    "cost_usd": fill_cost if fill_cost > 0 else filled_count * float(oo["price"]),
                     "status": "matched",
                     "question": oo.get("question"),
                     "close_time": oo.get("close_time"),
@@ -252,11 +279,12 @@ class OrderExecutor:
                     "order_id": order_id,
                 }
                 await self.db.log_trade(trade)
-                await self.tg.send_trade_alert({**trade, "note": f"Limit FILLED @ {float(oo['price'])*100:.0f}c"})
-                fills.append({"order_id": order_id, "count": filled_count, "cost": fill_cost})
+                await self.tg.send_trade_alert({**trade, "note": f"Limit FILLED {filled_count}x @ {actual_price*100:.1f}c"})
+                fills.append({"order_id": order_id, "ticker": oo["ticker"],
+                              "count": filled_count, "cost": fill_cost})
 
-            elif api_status in ("cancelled", "expired", "canceled"):
-                await self.db.update_open_order(order_id, api_status, 0)
+            elif api_status == "canceled":
+                await self.db.update_open_order(order_id, "cancelled", 0)
 
         return fills
 

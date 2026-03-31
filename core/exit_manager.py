@@ -121,21 +121,21 @@ class ExitManager:
         loss_pct = (pos.entry_price_no - current_no_price) / pos.entry_price_no
 
         if loss_pct >= 0.30 and pos.exit_stage < 3 and self.config.exit_down_30_full_exit:
-            await self._execute_exit(pos, 1.0, 3, "full_exit_30pct")
+            await self._execute_exit(pos, 1.0, 3, "full_exit_30pct", current_no_price)
         elif loss_pct >= 0.20 and pos.exit_stage < 2:
-            await self._execute_exit(pos, self.config.exit_down_20_cut_pct, 2, "cut_heavy_20pct")
+            await self._execute_exit(pos, self.config.exit_down_20_cut_pct, 2, "cut_heavy_20pct", current_no_price)
         elif loss_pct >= 0.10 and pos.exit_stage < 1:
-            await self._execute_exit(pos, self.config.exit_down_10_cut_pct, 1, "cut_some_10pct")
+            await self._execute_exit(pos, self.config.exit_down_10_cut_pct, 1, "cut_some_10pct", current_no_price)
 
     async def _execute_exit(self, pos: MonitoredPosition, cut_fraction: float,
-                             stage: int, reason: str):
+                             stage: int, reason: str, current_no_price: float):
         sell_count = max(1, int(pos.no_contracts * cut_fraction))
         if sell_count > pos.no_contracts:
             sell_count = pos.no_contracts
 
         ticker = pos.ticker
-        logger.info("Exit %s stage %d: selling %d/%d contracts (reason: %s)",
-                     ticker, stage, sell_count, pos.no_contracts, reason)
+        logger.info("Exit %s stage %d: selling %d/%d contracts (reason: %s, current_no=%.1fc)",
+                     ticker, stage, sell_count, pos.no_contracts, reason, current_no_price * 100)
 
         if self.config.dry_run:
             logger.info("[DRY RUN] Would sell %d NO contracts of %s", sell_count, ticker)
@@ -143,9 +143,19 @@ class ExitManager:
             return
 
         # To sell NO contracts: action="sell", side="no"
-        # Use market-like pricing: set yes_price very high (99c) so the NO sell
-        # goes through at whatever price is available
-        yes_price_cents = 99 if stage == 3 else 95  # aggressive for full exit
+        # We want our NO sell to execute, so we set a slightly aggressive NO price.
+        # For urgent exits (stage 3), accept a worse price.
+        # no_price is what the buyer pays for NO — we need to set it LOW enough
+        # to match existing bids.
+        if stage == 3:
+            # Full exit: sell at a steep discount to guarantee fill
+            sell_no_price_cents = max(1, int(current_no_price * 100) - 5)
+        elif stage == 2:
+            # Heavy cut: sell slightly below current
+            sell_no_price_cents = max(1, int(current_no_price * 100) - 3)
+        else:
+            # Stage 1: sell near current price
+            sell_no_price_cents = max(1, int(current_no_price * 100) - 2)
 
         try:
             result = await self.kalshi.place_order(
@@ -153,7 +163,8 @@ class ExitManager:
                 side="no",
                 action="sell",
                 count=sell_count,
-                yes_price_cents=yes_price_cents,
+                no_price_cents=sell_no_price_cents,
+                time_in_force="immediate_or_cancel",
                 client_order_id=str(uuid.uuid4()),
             )
         except Exception as e:
@@ -164,30 +175,36 @@ class ExitManager:
             logger.error("Exit order returned None for %s", ticker)
             return
 
-        order = result.get("order", {})
-        status = (order.get("status", "") or "").lower()
+        parsed = KalshiClient.parse_order_response(result)
+        filled_count = parsed["fill_count"]
+        fill_cost = parsed["taker_fill_cost"] + parsed["maker_fill_cost"]
 
-        # Estimate sell price (what we got for the NO contracts)
-        # NO sell price ~= 1 - yes_price_they_paid
-        sell_price = pos.entry_price_no * (1 - (0.10 * stage))  # rough estimate
-        realized_pnl = (sell_price - pos.entry_price_no) * sell_count
-        cost_removed = pos.entry_price_no * sell_count
+        if filled_count == 0:
+            logger.warning("Exit order got no fills for %s (stage %d, no_price=%dc)",
+                          ticker, stage, sell_no_price_cents)
+            # Don't advance stage if we couldn't sell — will retry next evaluation
+            return
+
+        # Actual sell price per contract (what we received)
+        actual_sell_price = fill_cost / filled_count if fill_cost > 0 else current_no_price
+        realized_pnl = (actual_sell_price - pos.entry_price_no) * filled_count
+        cost_removed = pos.entry_price_no * filled_count
 
         # Update position
-        pos.no_contracts -= sell_count
+        pos.no_contracts -= filled_count
         pos.exit_stage = stage
 
         # Log to database
         await self.db.log_exit(
             ticker=ticker,
             stage=stage,
-            contracts_sold=sell_count,
-            sell_price=sell_price,
+            contracts_sold=filled_count,
+            sell_price=actual_sell_price,
             entry_price=pos.entry_price_no,
             pnl=realized_pnl,
             reason=reason,
         )
-        await self.db.update_position_after_exit(ticker, sell_count, cost_removed)
+        await self.db.update_position_after_exit(ticker, filled_count, cost_removed)
 
         # Log trade
         trade = {
@@ -195,13 +212,14 @@ class ExitManager:
             "type": f"exit_{reason}",
             "side": "no",
             "action": "sell",
-            "intended_price": sell_price,
-            "count": sell_count,
+            "intended_price": current_no_price,
+            "fill_price": actual_sell_price,
+            "count": filled_count,
             "cost_usd": abs(realized_pnl),
-            "status": "matched" if status in ("executed", "filled") else status,
+            "status": "matched",
             "question": "",
             "city_date": pos.city_date,
-            "order_id": order.get("order_id", ""),
+            "order_id": parsed["order_id"],
         }
         await self.db.log_trade(trade)
 
@@ -209,8 +227,8 @@ class ExitManager:
         await self.tg.send_exit_alert(
             ticker=ticker,
             stage=stage,
-            contracts_sold=sell_count,
-            sell_price=sell_price,
+            contracts_sold=filled_count,
+            sell_price=actual_sell_price,
             entry_price=pos.entry_price_no,
             pnl=realized_pnl,
             reason=reason,
@@ -220,5 +238,6 @@ class ExitManager:
         if pos.no_contracts <= 0:
             await self.unregister_position(ticker)
 
-        logger.info("Exit %s stage %d complete: sold %d, remaining %d, pnl=$%.2f",
-                     ticker, stage, sell_count, pos.no_contracts, realized_pnl)
+        logger.info("Exit %s stage %d complete: sold %d @ %.1fc, remaining %d, pnl=$%.2f",
+                     ticker, stage, filled_count, actual_sell_price * 100,
+                     pos.no_contracts, realized_pnl)
