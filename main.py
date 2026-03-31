@@ -101,6 +101,41 @@ async def main():
     # Load persisted state
     await risk.load_frozen_cities()
 
+    # Reconcile DB with Kalshi portfolio on startup (prevents duplicate orders)
+    kalshi_positions = await kalshi.get_positions()
+    db_positions = await db.get_open_positions()
+    db_tickers = {p["ticker"]: p for p in db_positions}
+
+    for kp in kalshi_positions:
+        ticker = kp.get("ticker", "")
+        kalshi_count = abs(int(float(kp.get("position_fp", "0"))))
+        kalshi_cost = float(kp.get("total_traded_dollars", "0"))
+        if kalshi_count == 0:
+            continue
+
+        db_pos = db_tickers.get(ticker)
+        if db_pos is None:
+            # Position exists on Kalshi but not in DB — insert it
+            entry_price = kalshi_cost / kalshi_count if kalshi_count > 0 else 0
+            logger.warning("Reconcile: adding missing position %s (%d contracts, $%.2f)",
+                           ticker, kalshi_count, kalshi_cost)
+            await db.upsert_position({
+                "ticker": ticker,
+                "no_contracts": kalshi_count,
+                "no_cost": kalshi_cost,
+                "entry_price_no": entry_price,
+            })
+        elif int(db_pos["no_contracts"]) != kalshi_count:
+            # Count mismatch — update DB to match Kalshi (source of truth)
+            logger.warning("Reconcile: %s DB has %d contracts, Kalshi has %d — fixing",
+                           ticker, int(db_pos["no_contracts"]), kalshi_count)
+            await db.pool.execute(
+                "UPDATE positions SET no_contracts = $1, no_cost = $2, entry_price_no = $3 WHERE ticker = $4",
+                kalshi_count, kalshi_cost,
+                kalshi_cost / kalshi_count if kalshi_count > 0 else 0,
+                ticker,
+            )
+
     # Reload monitored positions for exit manager (survive restarts)
     open_pos = await db.get_positions_needing_monitoring()
     for p in open_pos:
