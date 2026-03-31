@@ -111,6 +111,9 @@ class KalshiWebSocket:
         # Local orderbook state per ticker
         self.orderbooks: dict[str, LocalOrderbook] = defaultdict(LocalOrderbook)
 
+        # Tickers that the exit manager is monitoring — only these push to price_queue
+        self._monitored_tickers: set[str] = set()
+
         # Latest ticker data per market (from ticker channel)
         self.ticker_data: dict[str, dict] = {}
 
@@ -216,6 +219,14 @@ class KalshiWebSocket:
             self._orderbook_tickers.discard(t)
             self._subscribed_tickers.discard(t)
             self.orderbooks.pop(t, None)
+
+    def monitor_ticker(self, ticker: str):
+        """Mark a ticker for price_queue updates (used by exit manager)."""
+        self._monitored_tickers.add(ticker)
+
+    def unmonitor_ticker(self, ticker: str):
+        """Stop pushing price_queue updates for this ticker."""
+        self._monitored_tickers.discard(ticker)
 
     async def subscribe_fills(self):
         if not self._ws:
@@ -357,11 +368,12 @@ class KalshiWebSocket:
         logger.debug("OB snapshot %s: %d yes, %d no levels (seq=%d)",
                       ticker, len(ob.yes_levels), len(ob.no_levels), seq)
 
-        # Push price update to exit manager queue
-        yes_bid = ob.best_yes_bid()
-        yes_ask = ob.best_yes_ask()
-        if yes_bid is not None or yes_ask is not None:
-            await self.price_queue.put((ticker, yes_bid, yes_ask))
+        # Only push to price queue for tickers the exit manager monitors
+        if ticker in self._monitored_tickers:
+            yes_bid = ob.best_yes_bid()
+            yes_ask = ob.best_yes_ask()
+            if yes_bid is not None or yes_ask is not None:
+                await self.price_queue.put((ticker, yes_bid, yes_ask))
 
     async def _handle_orderbook_delta(self, msg: dict):
         inner = msg.get("msg", {})
@@ -379,11 +391,12 @@ class KalshiWebSocket:
         ob = self.orderbooks[ticker]
         ob.apply_delta(side, price_dollars, delta_fp)
 
-        # Push updated price to exit manager
-        yes_bid = ob.best_yes_bid()
-        yes_ask = ob.best_yes_ask()
-        if yes_bid is not None or yes_ask is not None:
-            await self.price_queue.put((ticker, yes_bid, yes_ask))
+        # Only push to price queue for tickers the exit manager monitors
+        if ticker in self._monitored_tickers:
+            yes_bid = ob.best_yes_bid()
+            yes_ask = ob.best_yes_ask()
+            if yes_bid is not None or yes_ask is not None:
+                await self.price_queue.put((ticker, yes_bid, yes_ask))
 
     async def _handle_ticker(self, msg: dict):
         """Handle ticker channel updates — price, volume, open interest."""
@@ -401,10 +414,11 @@ class KalshiWebSocket:
             "ts": inner.get("ts"),
         }
 
-        # Also push to price queue for exit manager
-        td = self.ticker_data[ticker]
-        if td["yes_bid"] is not None or td["yes_ask"] is not None:
-            await self.price_queue.put((ticker, td["yes_bid"], td["yes_ask"]))
+        # Only push to price queue for tickers the exit manager monitors
+        if ticker in self._monitored_tickers:
+            td = self.ticker_data[ticker]
+            if td["yes_bid"] is not None or td["yes_ask"] is not None:
+                await self.price_queue.put((ticker, td["yes_bid"], td["yes_ask"]))
 
     # ------------------------------------------------------------------
     # Accessors for scanner/enrichment

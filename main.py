@@ -227,6 +227,10 @@ async def main():
                     await db.cleanup_old_scans(keep_hours=48)
                     last_daily_summary = now
 
+                # 7. Periodic scan_results cleanup (every 10 scans ≈ 10 min)
+                if scan_count % 10 == 0:
+                    await db.cleanup_old_scans(keep_hours=6)
+
                 if trades_this_scan > 0:
                     logger.info("Scan #%d: %d trades, %d resolutions",
                                 scan_count, trades_this_scan, len(resolved))

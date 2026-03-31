@@ -10,15 +10,29 @@ class CityConfig:
 
 
 CITIES: dict[str, CityConfig] = {
+    # --- Original cities ---
     "NYC": CityConfig("NYC", "New York City", "KXHIGHNY", "America/New_York"),
     "CHI": CityConfig("CHI", "Chicago", "KXHIGHCHI", "America/Chicago"),
     "MIA": CityConfig("MIA", "Miami", "KXHIGHMIA", "America/New_York"),
     "LA":  CityConfig("LA",  "Los Angeles", "KXHIGHLAX", "America/Los_Angeles"),
-    "PHX": CityConfig("PHX", "Phoenix", "KXHIGHTPHX", "America/Phoenix"),
-    "ATL": CityConfig("ATL", "Atlanta", "KXHIGHATL", "America/New_York"),
-    "DFW": CityConfig("DFW", "Dallas", "KXHIGHDFW", "America/Chicago"),
-    "HOU": CityConfig("HOU", "Houston", "KXHIGHHOU", "America/Chicago"),
     "DEN": CityConfig("DEN", "Denver", "KXHIGHDEN", "America/Denver"),
+
+    # --- Expansion cities ---
+    "AUS": CityConfig("AUS", "Austin", "KXHIGHAUS", "America/Chicago"),
+    "ATL": CityConfig("ATL", "Atlanta", "KXHIGHTATL", "America/New_York"),
+    "BOS": CityConfig("BOS", "Boston", "KXHIGHTBOS", "America/New_York"),
+    "DAL": CityConfig("DAL", "Dallas", "KXHIGHTDAL", "America/Chicago"),
+    "DC":  CityConfig("DC",  "Washington DC", "KXHIGHTDC", "America/New_York"),
+    "HOU": CityConfig("HOU", "Houston", "KXHIGHTHOU", "America/Chicago"),
+    "LV":  CityConfig("LV",  "Las Vegas", "KXHIGHTLV", "America/Los_Angeles"),
+    "MIN": CityConfig("MIN", "Minneapolis", "KXHIGHTMIN", "America/Chicago"),
+    "NOLA": CityConfig("NOLA", "New Orleans", "KXHIGHTNOLA", "America/Chicago"),
+    "OKC": CityConfig("OKC", "Oklahoma City", "KXHIGHTOKC", "America/Chicago"),
+    "PHX": CityConfig("PHX", "Phoenix", "KXHIGHTPHX", "America/Phoenix"),
+    "PHIL": CityConfig("PHIL", "Philadelphia", "KXHIGHPHIL", "America/New_York"),
+    "SATX": CityConfig("SATX", "San Antonio", "KXHIGHTSATX", "America/Chicago"),
+    "SEA": CityConfig("SEA", "Seattle", "KXHIGHTSEA", "America/Los_Angeles"),
+    "SFO": CityConfig("SFO", "San Francisco", "KXHIGHTSFO", "America/Los_Angeles"),
 }
 
 

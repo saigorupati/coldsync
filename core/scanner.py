@@ -7,12 +7,18 @@ from services.kalshi_rest import KalshiClient, KalshiOrderbook
 
 logger = logging.getLogger("coldsync.scanner")
 
+# How long to cache discovered tickers before re-fetching from REST
+DISCOVERY_CACHE_TTL_SECONDS = 300  # 5 minutes
+
 
 class LadderScanner:
     def __init__(self, config, kalshi: KalshiClient, ws=None):
         self.config = config
         self.kalshi = kalshi
         self.ws = ws  # KalshiWebSocket — if set, prefer WS orderbook data
+
+        # Cache: (city_code, date_str) -> (markets_list, timestamp)
+        self._discovery_cache: dict[str, tuple[list, float]] = {}
 
     async def scan(self) -> dict[str, list[dict]]:
         now = datetime.now(timezone.utc)
@@ -21,7 +27,6 @@ class LadderScanner:
 
         ladders = {}
 
-        # Scan one city at a time to stay under rate limits
         for city in active_cities:
             for dt in dates:
                 try:
@@ -35,9 +40,34 @@ class LadderScanner:
 
         return ladders
 
+    async def _discover_markets(self, city: CityConfig, dt) -> list:
+        """Discover markets for a city/date, with caching to reduce REST calls."""
+        cache_key = f"{city.code}|{dt.isoformat()}"
+        now = datetime.now(timezone.utc).timestamp()
+
+        cached = self._discovery_cache.get(cache_key)
+        if cached:
+            markets, ts = cached
+            if now - ts < DISCOVERY_CACHE_TTL_SECONDS and markets:
+                return markets
+
+        markets = await self.kalshi.get_city_markets(city.kalshi_series, dt)
+        self._discovery_cache[cache_key] = (markets, now)
+        return markets
+
+    def _cleanup_discovery_cache(self):
+        """Remove stale cache entries (yesterday's markets, etc.)."""
+        now = datetime.now(timezone.utc).timestamp()
+        stale_keys = [
+            k for k, (_, ts) in self._discovery_cache.items()
+            if now - ts > 3600  # 1 hour
+        ]
+        for k in stale_keys:
+            del self._discovery_cache[k]
+
     async def _fetch_event_ladder(self, city: CityConfig, dt) -> tuple[str, list[dict]] | None:
         try:
-            markets = await self.kalshi.get_city_markets(city.kalshi_series, dt)
+            markets = await self._discover_markets(city, dt)
         except Exception as e:
             logger.warning("Failed to fetch markets for %s on %s: %s", city.code, dt, e)
             return None
@@ -46,9 +76,8 @@ class LadderScanner:
             return None
 
         city_date = f"{city.code}|{dt.isoformat()}"
-        logger.info("%s: %d markets found", city_date, len(markets))
 
-        # Subscribe to WS channels for discovered tickers (if WS available)
+        # Subscribe to WS channels for discovered tickers (idempotent)
         if self.ws and self.ws.is_connected:
             tickers = [m.ticker for m in markets]
             await self.ws.subscribe_orderbook(tickers)
@@ -146,4 +175,4 @@ class LadderScanner:
         }
 
     async def close(self):
-        pass  # kalshi client managed externally
+        self._cleanup_discovery_cache()

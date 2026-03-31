@@ -50,14 +50,16 @@ class ExitManager:
             city_date=city_date,
             exit_stage=exit_stage,
         )
-        # Subscribe to WS orderbook updates for this ticker
+        # Subscribe to WS orderbook updates and mark for price_queue monitoring
         await self.ws.subscribe_orderbook([ticker])
+        self.ws.monitor_ticker(ticker)
         logger.info("Exit monitor: registered %s (%d contracts @ %.1fc, stage=%d)",
                      ticker, count, entry_price * 100, exit_stage)
 
     async def unregister_position(self, ticker: str):
         if ticker in self._positions:
             del self._positions[ticker]
+            self.ws.unmonitor_ticker(ticker)
             await self.ws.unsubscribe_orderbook([ticker])
             logger.info("Exit monitor: unregistered %s", ticker)
 
