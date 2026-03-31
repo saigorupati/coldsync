@@ -71,3 +71,23 @@ export interface TodayStats {
   losses: number
   daily_pnl: number
 }
+
+export interface ScanResult {
+  id: number
+  city_date: string
+  ticker: string
+  question: string
+  yes_price: number
+  no_price: number
+  prob_sum: number
+  excess: number
+  neighbor_ratio: number
+  com_distance: number
+  score: number
+  tier: string
+  order_size: number
+  spread: number
+  volume: number
+  skip_reason: string | null
+  scanned_at: string
+}

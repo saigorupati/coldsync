@@ -1,5 +1,5 @@
 import { pool } from './db'
-import type { RiskState, Position, Trade, DailyPnl, TodayStats } from './types'
+import type { RiskState, Position, Trade, DailyPnl, TodayStats, ScanResult } from './types'
 
 function num(val: unknown): number {
   if (val === null || val === undefined) return 0
@@ -89,6 +89,46 @@ export async function getRecentTrades(limit: number = 50): Promise<Trade[]> {
     count: parseInt(r.count || '0'),
     cost_usd: num(r.cost_usd),
   }))
+}
+
+export async function getLatestScanResults(): Promise<ScanResult[]> {
+  // Get the latest scan timestamp
+  const { rows: latestRows } = await pool.query(
+    'SELECT MAX(scanned_at) AS latest FROM scan_results'
+  )
+  const latestTime = latestRows[0]?.latest
+  if (!latestTime) return []
+
+  // Get distinct latest results per ticker within a 2-minute window
+  const { rows } = await pool.query(
+    `SELECT * FROM (
+       SELECT DISTINCT ON (ticker) *
+       FROM scan_results
+       WHERE scanned_at >= $1::timestamptz - interval '2 minutes'
+       ORDER BY ticker, scanned_at DESC
+     ) sub
+     ORDER BY city_date, score DESC`,
+    [latestTime]
+  )
+
+  return rows.map((r) => ({
+    ...r,
+    yes_price: num(r.yes_price),
+    no_price: num(r.no_price),
+    prob_sum: num(r.prob_sum),
+    excess: num(r.excess),
+    neighbor_ratio: num(r.neighbor_ratio),
+    com_distance: num(r.com_distance),
+    score: num(r.score),
+    order_size: num(r.order_size),
+    spread: num(r.spread),
+    volume: num(r.volume),
+  }))
+}
+
+export async function getLatestScanTime(): Promise<string | null> {
+  const { rows } = await pool.query('SELECT MAX(scanned_at) AS latest FROM scan_results')
+  return rows[0]?.latest || null
 }
 
 export async function getDailyPnl(): Promise<DailyPnl[]> {
