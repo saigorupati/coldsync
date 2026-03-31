@@ -222,8 +222,108 @@ class OrderExecutor:
         await self.tg.send_trade_alert({**trade, "note": note})
         return trade
 
+    # ------------------------------------------------------------------
+    # WS fill processing (real-time)
+    # ------------------------------------------------------------------
+
+    async def process_ws_fill(self, fill: dict) -> dict | None:
+        """Process a fill notification from the WS fill channel.
+
+        On receiving a fill, we fetch the full order status via REST
+        to get accurate totals (handles partial fills correctly).
+        Returns fill info dict or None if not our tracked order.
+        """
+        order_id = fill.get("order_id", "")
+        ticker = fill.get("market_ticker", "")
+        if not order_id:
+            return None
+
+        # Check if this is one of our tracked resting orders
+        open_orders = await self.db.get_open_orders()
+        matching_order = None
+        for oo in open_orders:
+            if oo["order_id"] == order_id:
+                matching_order = oo
+                break
+
+        if not matching_order:
+            # Not a tracked limit order — could be an IOC fill (already handled inline)
+            logger.debug("WS fill for untracked order %s on %s", order_id[:8], ticker)
+            return None
+
+        # Fetch full order status for accurate fill totals
+        try:
+            result = await self.kalshi.get_order_status(order_id)
+        except Exception as e:
+            logger.warning("Failed to fetch order after WS fill %s: %s", order_id, e)
+            return None
+
+        if result is None:
+            return None
+
+        parsed = KalshiClient.parse_order_response({"order": result})
+        api_status = parsed["status"]
+        filled_count = parsed["fill_count"]
+        fill_cost = parsed["taker_fill_cost"] + parsed["maker_fill_cost"]
+        remaining = parsed["remaining_count"]
+
+        if filled_count == 0:
+            return None
+
+        oo = matching_order
+        actual_price = fill_cost / filled_count if fill_cost > 0 else float(oo["price"])
+
+        # Mark order as filled/partial
+        if api_status == "executed" or remaining == 0:
+            await self.db.update_open_order(order_id, "filled", filled_count)
+        else:
+            # Partial fill — order still resting
+            await self.db.update_open_order(order_id, "partial", filled_count)
+
+        await self.db.upsert_position({
+            "ticker": oo["ticker"],
+            "event_ticker": "",
+            "question": oo.get("question"),
+            "no_contracts": filled_count,
+            "no_cost": fill_cost if fill_cost > 0 else filled_count * float(oo["price"]),
+            "entry_price_no": actual_price,
+            "city_date": oo.get("city_date", ""),
+            "close_time": oo.get("close_time"),
+        })
+
+        trade = {
+            "ticker": oo["ticker"],
+            "type": oo["order_type"],
+            "side": "no",
+            "action": "buy",
+            "intended_price": float(oo["price"]),
+            "fill_price": actual_price,
+            "count": filled_count,
+            "cost_usd": fill_cost if fill_cost > 0 else filled_count * float(oo["price"]),
+            "status": "matched" if remaining == 0 else "partial",
+            "question": oo.get("question"),
+            "close_time": oo.get("close_time"),
+            "city_date": oo.get("city_date", ""),
+            "order_id": order_id,
+        }
+        await self.db.log_trade(trade)
+
+        status_str = "FILLED" if remaining == 0 else f"PARTIAL ({filled_count} filled, {remaining} left)"
+        await self.tg.send_trade_alert({**trade, "note": f"WS: Limit {status_str} @ {actual_price*100:.1f}c"})
+
+        logger.info("WS fill processed: %s %s %dx @ %.1fc (%s)",
+                     oo["ticker"], status_str, filled_count, actual_price * 100, order_id[:8])
+
+        return {"order_id": order_id, "ticker": oo["ticker"],
+                "count": filled_count, "cost": fill_cost}
+
+    # ------------------------------------------------------------------
+    # REST polling fallback (less frequent)
+    # ------------------------------------------------------------------
+
     async def poll_open_orders(self) -> list[dict]:
-        """Poll resting orders for fills using proper API response fields."""
+        """Fallback: poll resting orders via REST for fills.
+        Only needed when WS is down or as periodic safety check."""
         open_orders = await self.db.get_open_orders()
         if not open_orders:
             return []
@@ -240,8 +340,6 @@ class OrderExecutor:
             if result is None:
                 continue
 
-            # Parse using the proper response fields
-            # get_order_status returns the order dict directly (already unwrapped)
             parsed = KalshiClient.parse_order_response({"order": result})
             api_status = parsed["status"]
             filled_count = parsed["fill_count"]
@@ -279,7 +377,7 @@ class OrderExecutor:
                     "order_id": order_id,
                 }
                 await self.db.log_trade(trade)
-                await self.tg.send_trade_alert({**trade, "note": f"Limit FILLED {filled_count}x @ {actual_price*100:.1f}c"})
+                await self.tg.send_trade_alert({**trade, "note": f"REST poll: FILLED {filled_count}x @ {actual_price*100:.1f}c"})
                 fills.append({"order_id": order_id, "ticker": oo["ticker"],
                               "count": filled_count, "cost": fill_cost})
 

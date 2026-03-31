@@ -326,8 +326,32 @@ class KalshiWebSocket:
             await self._handle_ticker(msg)
 
         elif msg_type == "fill":
-            fill = msg.get("msg", {})
-            await self.fill_queue.put(fill)
+            # Fill msg lives at top level per docs, not nested in msg
+            fill = msg.get("msg", msg)
+            trade_id = fill.get("trade_id", "")
+            order_id = fill.get("order_id", "")
+            ticker = fill.get("market_ticker", "")
+            count = float(fill.get("count_fp", "0"))
+            price = float(fill.get("yes_price_dollars", "0"))
+            side = fill.get("side", "")
+            action = fill.get("action", "")
+            fee = float(fill.get("fee_cost", "0"))
+            is_taker = fill.get("is_taker", False)
+            logger.info("WS fill: %s %s %s %.0f contracts @ $%.2f (order=%s, taker=%s, fee=$%.4f)",
+                        action, side, ticker, count, price, order_id[:8] if order_id else "?",
+                        is_taker, fee)
+            await self.fill_queue.put({
+                "trade_id": trade_id,
+                "order_id": order_id,
+                "market_ticker": ticker,
+                "side": side,
+                "action": action,
+                "count_fp": fill.get("count_fp", "0"),
+                "yes_price_dollars": fill.get("yes_price_dollars", "0"),
+                "fee_cost": fill.get("fee_cost", "0"),
+                "is_taker": is_taker,
+                "client_order_id": fill.get("client_order_id", ""),
+            })
 
         elif msg_type == "market_position":
             inner = msg.get("msg", {})

@@ -24,6 +24,37 @@ logging.getLogger("coldsync.scanner").setLevel(logging.DEBUG)
 logger = logging.getLogger("coldsync")
 
 
+async def fill_monitor(fill_queue: asyncio.Queue, executor: OrderExecutor,
+                       exit_mgr: ExitManager):
+    """Background task: process WS fill notifications in real-time."""
+    while True:
+        try:
+            fill = await fill_queue.get()
+            result = await executor.process_ws_fill(fill)
+            if result:
+                ticker = result.get("ticker", "")
+                # Register newly filled limit orders with exit manager
+                if ticker:
+                    # Check if already monitored (avoid duplicates)
+                    pos = await executor.db.get_open_positions()
+                    for p in pos:
+                        if p["ticker"] == ticker and ticker not in exit_mgr._positions:
+                            await exit_mgr.register_position(
+                                ticker=ticker,
+                                entry_price=float(p["entry_price_no"]),
+                                count=int(p["no_contracts"]),
+                                city_date=p.get("city_date", ""),
+                                exit_stage=int(p.get("exit_stage", 0)),
+                            )
+                            break
+        except asyncio.CancelledError:
+            logger.info("Fill monitor task cancelled")
+            break
+        except Exception as e:
+            logger.error("Fill monitor error: %s", e, exc_info=True)
+            await asyncio.sleep(1)
+
+
 async def main():
     load_dotenv("config/.env")
 
@@ -87,6 +118,7 @@ async def main():
     # Spawn background tasks
     ws_task = asyncio.create_task(ws.run())
     exit_task = asyncio.create_task(exit_mgr.run())
+    fill_task = asyncio.create_task(fill_monitor(fill_queue, executor, exit_mgr))
 
     last_daily_summary = None
     last_resolution_hour = None
@@ -102,14 +134,25 @@ async def main():
 
                 scan_count += 1
 
-                # 0. Poll resting limit orders for fills
-                order_fills = await executor.poll_open_orders()
-                if order_fills:
-                    logger.info("Detected %d order fill(s)", len(order_fills))
-                    for fill in order_fills:
-                        ticker = fill.get("order_id", "")
-                        # Try to get ticker from the fill — need to look up from open orders
-                        # The fills from poll_open_orders are already handled by executor
+                # 0. REST poll for fills as safety fallback (every 5 scans ≈ 5 min)
+                #    Primary fill detection is via WS fill_monitor task above
+                if scan_count % 5 == 0:
+                    order_fills = await executor.poll_open_orders()
+                    if order_fills:
+                        logger.info("REST fallback detected %d fill(s)", len(order_fills))
+                        for fill in order_fills:
+                            ticker = fill.get("ticker", "")
+                            if ticker and ticker not in exit_mgr._positions:
+                                pos_list = await db.get_open_positions()
+                                for p in pos_list:
+                                    if p["ticker"] == ticker:
+                                        await exit_mgr.register_position(
+                                            ticker=ticker,
+                                            entry_price=float(p["entry_price_no"]),
+                                            count=int(p["no_contracts"]),
+                                            city_date=p.get("city_date", ""),
+                                        )
+                                        break
 
                 # 1. Check resolutions (once per hour)
                 current_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
@@ -204,7 +247,7 @@ async def main():
                             # Register with exit manager for price monitoring
                             await exit_mgr.register_position(
                                 ticker=ticker,
-                                entry_price=result.get("intended_price", 0.95),
+                                entry_price=result.get("fill_price", result.get("intended_price", 0.95)),
                                 count=result.get("count", 0),
                                 city_date=city_date,
                             )
@@ -249,12 +292,17 @@ async def main():
         logger.info("Cleaning up...")
         ws_task.cancel()
         exit_task.cancel()
+        fill_task.cancel()
         try:
             await ws_task
         except asyncio.CancelledError:
             pass
         try:
             await exit_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await fill_task
         except asyncio.CancelledError:
             pass
         await kalshi.close()
