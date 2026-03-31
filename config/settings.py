@@ -34,7 +34,7 @@ class StrategyConfig:
 
     # --- No price filters ---
     no_price_min: float = 0.90
-    no_price_max: float = 0.99       # Kalshi: tight bins at 0.985-0.99 still profitable
+    no_price_max: float = 0.98       # Cap at 98c — 99c leaves no margin after fees
     no_price_sweet_min: float = 0.90
     no_price_sweet_max: float = 0.96  # Kalshi: sweet spot slightly wider
 
