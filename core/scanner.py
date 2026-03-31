@@ -3,15 +3,16 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from config.cities import CityConfig, get_active_cities
-from services.kalshi_rest import KalshiClient
+from services.kalshi_rest import KalshiClient, KalshiOrderbook
 
 logger = logging.getLogger("coldsync.scanner")
 
 
 class LadderScanner:
-    def __init__(self, config, kalshi: KalshiClient):
+    def __init__(self, config, kalshi: KalshiClient, ws=None):
         self.config = config
         self.kalshi = kalshi
+        self.ws = ws  # KalshiWebSocket — if set, prefer WS orderbook data
 
     async def scan(self) -> dict[str, list[dict]]:
         now = datetime.now(timezone.utc)
@@ -22,7 +23,6 @@ class LadderScanner:
 
         # Scan one city at a time to stay under rate limits
         for city in active_cities:
-            # Fetch all dates for this city sequentially
             for dt in dates:
                 try:
                     result = await self._fetch_event_ladder(city, dt)
@@ -48,23 +48,57 @@ class LadderScanner:
         city_date = f"{city.code}|{dt.isoformat()}"
         logger.info("%s: %d markets found", city_date, len(markets))
 
-        # Fetch orderbooks sequentially (batch endpoint not available)
+        # Subscribe to WS channels for discovered tickers (if WS available)
+        if self.ws and self.ws.is_connected:
+            tickers = [m.ticker for m in markets]
+            await self.ws.subscribe_orderbook(tickers)
+            await self.ws.subscribe_ticker(tickers)
+
         bins = []
+        ws_hits = 0
+        rest_hits = 0
+
         for m in markets:
             try:
-                ob = await self.kalshi.get_orderbook(m.ticker)
-                enriched = self._enrich_market(m, ob)
+                ob = None
+
+                # Try WS local orderbook first
+                if self.ws and self.ws.has_orderbook(m.ticker):
+                    ws_data = self.ws.get_orderbook_data(m.ticker)
+                    if ws_data:
+                        ob = KalshiOrderbook(
+                            ticker=m.ticker,
+                            yes_bids=ws_data["yes_bids"],
+                            yes_asks=ws_data["yes_asks"],
+                        )
+                        ws_hits += 1
+
+                # Fall back to REST
+                if ob is None:
+                    ob = await self.kalshi.get_orderbook(m.ticker)
+                    rest_hits += 1
+
+                # Use ticker channel volume if available (more up-to-date)
+                volume = m.volume
+                if self.ws:
+                    td = self.ws.get_ticker_data(m.ticker)
+                    if td and td.get("volume") is not None:
+                        volume = td["volume"]
+
+                enriched = self._enrich_market(m, ob, volume)
                 if enriched is not None:
                     bins.append(enriched)
             except Exception as e:
                 logger.warning("Enrich exception in %s for %s: %s", city_date, m.ticker, e)
+
         if markets and not bins:
             logger.info("%s: %d markets found, 0 passed enrichment", city_date, len(markets))
         elif bins:
-            logger.info("%s: %d/%d bins enriched", city_date, len(bins), len(markets))
+            logger.info("%s: %d/%d bins enriched (ws=%d, rest=%d)",
+                        city_date, len(bins), len(markets), ws_hits, rest_hits)
         return city_date, bins
 
-    def _enrich_market(self, market, ob) -> dict | None:
+    def _enrich_market(self, market, ob, volume: int = 0) -> dict | None:
         if ob is None or not ob.yes_asks:
             logger.debug("No orderbook/asks for %s", market.ticker)
             return None
@@ -103,7 +137,7 @@ class LadderScanner:
             "spread": spread,
             "depth_2c_usd": depth_2c,
             "close_time": market.close_time,
-            "volume": market.volume,
+            "volume": volume,
             "city_date": "",  # set by caller
             "temp_low": market.temp_low,
             "temp_high": market.temp_high,

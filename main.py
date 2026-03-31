@@ -58,7 +58,7 @@ async def main():
     )
 
     # Init core components
-    scanner = LadderScanner(config, kalshi)
+    scanner = LadderScanner(config, kalshi, ws=ws)
     distortion = DistortionScorer(config)
     tier_classifier = TierClassifier(config)
     sizer = PositionSizer(config)
