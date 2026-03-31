@@ -1,0 +1,15 @@
+[Unit]
+Description=ColdSync Temperature Market Bot
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/coldsync
+ExecStart=/home/ec2-user/coldsync/.venv/bin/python main.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
