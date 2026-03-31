@@ -1,5 +1,6 @@
 import { getRecentTrades } from '@/lib/queries'
-import { formatUsd, formatCents, cityFromCityDate, formatRelativeTime } from '@/lib/format'
+import { formatUsd, formatCents, cityFromCityDate } from '@/lib/format'
+import LocalTime from '../components/local-time'
 
 export const dynamic = 'force-dynamic'
 
@@ -31,7 +32,7 @@ export default async function TradesPage() {
               {trades.map((trade) => (
                 <tr key={trade.id} className="border-b border-zinc-800/50 hover:bg-zinc-900/50">
                   <td className="py-3 pr-4 text-zinc-500 text-xs whitespace-nowrap">
-                    {formatRelativeTime(trade.timestamp)}
+                    <LocalTime date={trade.timestamp} format="relative" />
                   </td>
                   <td className="py-3 pr-4">
                     <span className={`text-xs px-2 py-0.5 rounded ${

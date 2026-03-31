@@ -1,6 +1,7 @@
 import { getRiskState, getOpenPositionsCount, getTodayStats, getTotalPnl } from '@/lib/queries'
 import { formatUsd, formatPnl, pnlColor, phaseLabel } from '@/lib/format'
 import StatCard from './components/stat-card'
+import LocalTime from './components/local-time'
 
 export const dynamic = 'force-dynamic'
 
@@ -49,13 +50,13 @@ export default async function OverviewPage() {
 
       {risk?.paused_until && new Date(risk.paused_until) > new Date() && (
         <div className="mt-6 p-4 bg-red-900/30 border border-red-800 rounded-lg">
-          <p className="text-red-400 font-medium">Risk pause active until {new Date(risk.paused_until).toLocaleString()}</p>
+          <p className="text-red-400 font-medium">Risk pause active until <LocalTime date={risk.paused_until} format="short" /></p>
         </div>
       )}
 
       {risk?.balance_updated_at && (
         <p className="mt-4 text-xs text-zinc-600">
-          Last updated: {new Date(risk.balance_updated_at).toLocaleString()}
+          Last updated: <LocalTime date={risk.balance_updated_at} format="short" />
         </p>
       )}
     </div>

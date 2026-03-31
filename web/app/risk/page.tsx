@@ -1,6 +1,7 @@
 import { getRiskState, getPerformanceStats, getFrozenCities, getTotalPnl } from '@/lib/queries'
 import { formatUsd, formatPnl, pnlColor, phaseLabel } from '@/lib/format'
 import StatCard from '../components/stat-card'
+import LocalTime from '../components/local-time'
 
 export const dynamic = 'force-dynamic'
 
@@ -112,7 +113,7 @@ export default async function RiskPage() {
       {isPaused && (
         <div className="mb-6 p-4 bg-red-900/30 border border-red-800 rounded-lg">
           <p className="text-red-400 font-medium">
-            Risk pause active until {new Date(risk!.paused_until!).toLocaleString()}
+            Risk pause active until <LocalTime date={risk!.paused_until!} format="short" />
           </p>
         </div>
       )}
@@ -120,7 +121,7 @@ export default async function RiskPage() {
       {isScaled && scaleFactor !== 1 && (
         <div className="mb-6 p-4 bg-orange-900/30 border border-orange-800 rounded-lg">
           <p className="text-orange-400 font-medium">
-            Scale override active ({(scaleFactor * 100).toFixed(0)}%) until {new Date(risk!.scale_expires!).toLocaleString()}
+            Scale override active ({(scaleFactor * 100).toFixed(0)}%) until <LocalTime date={risk!.scale_expires!} format="short" />
           </p>
         </div>
       )}
@@ -202,12 +203,11 @@ export default async function RiskPage() {
               </thead>
               <tbody>
                 {frozenCities.map((fc) => {
-                  const until = new Date(fc.frozen_until)
-                  const remaining = Math.max(0, Math.floor((until.getTime() - Date.now()) / 3600000))
+                  const remaining = Math.max(0, Math.floor((new Date(fc.frozen_until).getTime() - Date.now()) / 3600000))
                   return (
                     <tr key={fc.city_date} className="border-b border-zinc-800/50">
                       <td className="p-3 text-white font-mono">{fc.city_date}</td>
-                      <td className="p-3 text-zinc-300">{until.toLocaleString()}</td>
+                      <td className="p-3 text-zinc-300"><LocalTime date={fc.frozen_until} format="short" /></td>
                       <td className="p-3 text-orange-400">{remaining}h</td>
                     </tr>
                   )
@@ -245,7 +245,7 @@ export default async function RiskPage() {
 
       {risk?.balance_updated_at && (
         <p className="mt-6 text-xs text-zinc-600">
-          Last updated: {new Date(risk.balance_updated_at).toLocaleString()}
+          Last updated: <LocalTime date={risk.balance_updated_at} format="short" />
         </p>
       )}
     </div>

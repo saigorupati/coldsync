@@ -2,6 +2,7 @@ import { getLatestScanResults, getLatestScanTime } from '@/lib/queries'
 import type { ScanResult } from '@/lib/types'
 import AutoRefresh from '../components/auto-refresh'
 import ScoringFilters from '../components/scoring-filters'
+import LocalTime from '../components/local-time'
 
 export const dynamic = 'force-dynamic'
 
@@ -170,7 +171,7 @@ export default async function ScoringPage({ searchParams }: PageProps) {
           <h2 className="text-2xl font-bold text-white">Live Scoring</h2>
           <p className="text-sm text-zinc-500 mt-1">
             {latestTime
-              ? `Last scan: ${new Date(latestTime).toLocaleString('en-US', { timeZone: 'UTC', hour12: false })} UTC`
+              ? <>Last scan: <LocalTime date={latestTime} format="short" /></>
               : 'Waiting for first scan...'}
           </p>
         </div>
