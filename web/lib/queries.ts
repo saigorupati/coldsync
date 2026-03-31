@@ -1,5 +1,5 @@
 import { pool } from './db'
-import type { RiskState, Position, Trade, DailyPnl, TodayStats, ScanResult } from './types'
+import type { RiskState, Position, Trade, DailyPnl, TodayStats, ScanResult, FrozenCity, PerformanceStats } from './types'
 
 function num(val: unknown): number {
   if (val === null || val === undefined) return 0
@@ -115,6 +115,63 @@ export async function getLatestScanResults(): Promise<ScanResult[]> {
 export async function getLatestScanTime(): Promise<string | null> {
   const { rows } = await pool.query('SELECT MAX(scanned_at) AS latest FROM scan_results')
   return rows[0]?.latest || null
+}
+
+export async function getFrozenCities(): Promise<FrozenCity[]> {
+  const { rows } = await pool.query(
+    'SELECT city_date, frozen_until FROM frozen_cities WHERE frozen_until > NOW() ORDER BY frozen_until DESC'
+  )
+  return rows
+}
+
+export async function getPerformanceStats(): Promise<PerformanceStats> {
+  const [pnlRes, winRateRes, daysRes, streakRes] = await Promise.all([
+    pool.query(`
+      SELECT COALESCE(SUM(pnl), 0) AS resolution_pnl FROM positions WHERE resolved = TRUE
+    `),
+    pool.query(`
+      SELECT COUNT(*) AS total,
+             COUNT(*) FILTER (WHERE pnl >= 0) AS wins,
+             COUNT(*) FILTER (WHERE pnl < 0) AS losses
+      FROM positions WHERE resolved = TRUE AND no_contracts > 0
+    `),
+    pool.query(`
+      SELECT EXTRACT(DAY FROM NOW() - started_at)::int AS days
+      FROM risk_state WHERE id = 1
+    `),
+    pool.query(`
+      SELECT date, daily_pnl FROM daily_pnl ORDER BY date DESC LIMIT 30
+    `),
+  ])
+
+  const exitPnlRes = await pool.query(
+    'SELECT COALESCE(SUM(realized_pnl), 0) AS total FROM exits'
+  )
+
+  const totalPnl = num(pnlRes.rows[0].resolution_pnl) + num(exitPnlRes.rows[0].total)
+  const total = parseInt(winRateRes.rows[0].total)
+  const wins = parseInt(winRateRes.rows[0].wins)
+  const losses = parseInt(winRateRes.rows[0].losses)
+  const noWinRate = total > 0 ? wins / total : 0
+
+  let streak = 0
+  for (const r of streakRes.rows) {
+    if (r.daily_pnl && num(r.daily_pnl) > 0) {
+      streak++
+    } else {
+      break
+    }
+  }
+
+  return {
+    total_pnl: totalPnl,
+    no_win_rate: noWinRate,
+    total_resolved: total,
+    total_wins: wins,
+    total_losses: losses,
+    days_active: parseInt(daysRes.rows[0]?.days || '0'),
+    consecutive_profitable_days: streak,
+  }
 }
 
 export async function getDailyPnl(): Promise<DailyPnl[]> {

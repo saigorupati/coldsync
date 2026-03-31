@@ -6,6 +6,7 @@ const navItems = [
   { href: '/positions', label: 'Positions' },
   { href: '/trades', label: 'Trades' },
   { href: '/pnl', label: 'P&L' },
+  { href: '/risk', label: 'Risk' },
 ]
 
 export default function Sidebar() {

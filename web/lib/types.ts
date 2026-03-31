@@ -72,6 +72,21 @@ export interface TodayStats {
   daily_pnl: number
 }
 
+export interface FrozenCity {
+  city_date: string
+  frozen_until: string
+}
+
+export interface PerformanceStats {
+  total_pnl: number
+  no_win_rate: number
+  total_resolved: number
+  total_wins: number
+  total_losses: number
+  days_active: number
+  consecutive_profitable_days: number
+}
+
 export interface ScanResult {
   id: number
   city_date: string
