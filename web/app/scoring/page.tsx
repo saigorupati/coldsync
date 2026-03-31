@@ -1,5 +1,6 @@
 import { getLatestScanResults, getLatestScanTime } from '@/lib/queries'
 import type { ScanResult } from '@/lib/types'
+import { kalshiMarketUrl } from '@/lib/format'
 import AutoRefresh from '../components/auto-refresh'
 import ScoringFilters from '../components/scoring-filters'
 import LocalTime from '../components/local-time'
@@ -310,9 +311,14 @@ export default async function ScoringPage({ searchParams }: PageProps) {
                             } transition-all`}
                           >
                             <td className="px-4 py-2">
-                              <code className={`text-xs ${isActionable ? 'text-zinc-300' : 'text-zinc-600'}`}>
+                              <a
+                                href={kalshiMarketUrl(row.ticker)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className={`text-xs font-mono ${isActionable ? 'text-blue-400 hover:text-blue-300 hover:underline' : 'text-zinc-600 hover:text-zinc-500 hover:underline'}`}
+                              >
                                 {row.ticker}
-                              </code>
+                              </a>
                             </td>
                             <td className="px-3 py-2">
                               <span className={`font-mono ${isActionable ? 'text-white font-medium' : 'text-zinc-500'}`}>

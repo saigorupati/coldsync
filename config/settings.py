@@ -94,9 +94,10 @@ class StrategyConfig:
     # --- City config ---
     whitelisted_cities: list = field(default_factory=lambda: [
         "NYC", "CHI", "MIA", "LA", "DEN",
-        # "AUS", "ATL", "BOS", "DAL", "DC",
-        # "HOU", "LV", "MIN", "NOLA", "OKC",
-        # "PHX", "PHIL", "SATX", "SEA", "SFO",
+        "ATL", "PHX", "HOU",
+        # "AUS", "BOS", "DAL", "DC",
+        # "LV", "MIN", "NOLA", "OKC",
+        # "PHIL", "SATX", "SEA", "SFO",
     ])
     blocked_cities: list = field(default_factory=list)
 
