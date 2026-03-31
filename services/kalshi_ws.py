@@ -120,6 +120,10 @@ class KalshiWebSocket:
         # Latest position data per market (from market_positions channel)
         self.position_data: dict[str, dict] = {}
 
+        # Debounce: track last price_queue push time per ticker (avoid flooding)
+        self._last_price_push: dict[str, float] = {}
+        self._price_push_min_interval = 1.0  # seconds between pushes per ticker
+
     def _load_private_key(self, pem_or_path: str):
         if not pem_or_path or pem_or_path == "PLACEHOLDER_PEM":
             return None
@@ -214,11 +218,45 @@ class KalshiWebSocket:
             logger.warning("WS orderbook subscribe failed: %s", e)
 
     async def unsubscribe_orderbook(self, tickers: list[str]):
-        """Stop tracking orderbook for tickers."""
+        """Unsubscribe from orderbook_delta on server and clean up local state."""
+        unsub = [t for t in tickers if t in self._orderbook_tickers]
+        if unsub and self._ws:
+            msg = {
+                "id": self._next_cmd_id(),
+                "cmd": "unsubscribe",
+                "params": {
+                    "channels": ["orderbook_delta"],
+                    "market_tickers": unsub,
+                },
+            }
+            try:
+                await self._ws.send(json.dumps(msg))
+                logger.info("WS unsubscribed orderbook for %d tickers", len(unsub))
+            except Exception as e:
+                logger.warning("WS orderbook unsubscribe failed: %s", e)
+        # Also unsubscribe from ticker channel
+        ticker_unsub = [t for t in tickers if t in self._ticker_tickers]
+        if ticker_unsub and self._ws:
+            msg = {
+                "id": self._next_cmd_id(),
+                "cmd": "unsubscribe",
+                "params": {
+                    "channels": ["ticker"],
+                    "market_tickers": ticker_unsub,
+                },
+            }
+            try:
+                await self._ws.send(json.dumps(msg))
+            except Exception:
+                pass
+
         for t in tickers:
             self._orderbook_tickers.discard(t)
             self._subscribed_tickers.discard(t)
+            self._ticker_tickers.discard(t)
             self.orderbooks.pop(t, None)
+            self.ticker_data.pop(t, None)
+            self._last_price_push.pop(t, None)
 
     def monitor_ticker(self, ticker: str):
         """Mark a ticker for price_queue updates (used by exit manager)."""
@@ -309,6 +347,15 @@ class KalshiWebSocket:
                 except Exception as e:
                     logger.warning("WS message handling error: %s", e)
 
+    async def _push_price_debounced(self, ticker: str, yes_bid, yes_ask):
+        """Push price to queue with per-ticker debouncing to avoid flooding exit manager."""
+        now = time.time()
+        last = self._last_price_push.get(ticker, 0)
+        if now - last < self._price_push_min_interval:
+            return
+        self._last_price_push[ticker] = now
+        await self.price_queue.put((ticker, yes_bid, yes_ask))
+
     # ------------------------------------------------------------------
     # Message dispatch
     # ------------------------------------------------------------------
@@ -397,7 +444,7 @@ class KalshiWebSocket:
             yes_bid = ob.best_yes_bid()
             yes_ask = ob.best_yes_ask()
             if yes_bid is not None or yes_ask is not None:
-                await self.price_queue.put((ticker, yes_bid, yes_ask))
+                await self._push_price_debounced(ticker, yes_bid, yes_ask)
 
     async def _handle_orderbook_delta(self, msg: dict):
         inner = msg.get("msg", {})
@@ -420,7 +467,7 @@ class KalshiWebSocket:
             yes_bid = ob.best_yes_bid()
             yes_ask = ob.best_yes_ask()
             if yes_bid is not None or yes_ask is not None:
-                await self.price_queue.put((ticker, yes_bid, yes_ask))
+                await self._push_price_debounced(ticker, yes_bid, yes_ask)
 
     async def _handle_ticker(self, msg: dict):
         """Handle ticker channel updates — price, volume, open interest."""
@@ -461,6 +508,10 @@ class KalshiWebSocket:
     def has_orderbook(self, ticker: str) -> bool:
         ob = self.orderbooks.get(ticker)
         return ob is not None and (bool(ob.yes_levels) or bool(ob.no_levels))
+
+    def subscribed_ticker_count(self) -> int:
+        """How many tickers are subscribed to WS channels."""
+        return len(self._orderbook_tickers | self._ticker_tickers)
 
     @property
     def is_connected(self) -> bool:

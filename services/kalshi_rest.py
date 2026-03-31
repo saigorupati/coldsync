@@ -1,181 +1,329 @@
-"""Async Kalshi REST client with RSA-PSS authentication."""
+"""
+Async Kalshi API client with RSA-PSS authentication.
 
-import asyncio
-import base64
-import hashlib
-import logging
+Handles market discovery, orderbook fetching, order placement, and portfolio queries.
+Ported from kalshi-edge-trader's synchronous client to async httpx.
+"""
+
+import re
 import time
 import uuid
+import base64
+import asyncio
+import logging
+import datetime
+from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
-from cryptography.hazmat.primitives.asymmetric import padding, utils as crypto_utils
 from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 
 logger = logging.getLogger("coldsync.kalshi")
 
-PROD_BASE = "https://api.elections.kalshi.com/trade-api/v2"
-DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
-PROD_WS = "wss://api.elections.kalshi.com/trade-api/ws/v2"
-DEMO_WS = "wss://demo-api.kalshi.co/trade-api/ws/v2"
+DEMO_BASE_URL = "https://demo-api.kalshi.co/trade-api/v2"
+PROD_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+REQUEST_TIMEOUT = 20
+MIN_REQUEST_INTERVAL = 0.12  # ~8 req/s, comfortably under 10 req/s prod limit
+KALSHI_MARKET_TZ = ZoneInfo("America/New_York")
 
 
 @dataclass
 class KalshiMarket:
-    """Represents a single market bin from Kalshi."""
     ticker: str
     event_ticker: str
-    question: str = ""
-    yes_price: float = 0.0
-    no_price: float = 0.0
-    yes_bid: float = 0.0
-    yes_ask: float = 0.0
-    spread: float = 0.0
+    yes_ask: float
+    yes_bid: float
+    yes_sub_title: str
+    temp_low: Optional[float]
+    temp_high: Optional[float]
+    is_open_low: bool
+    is_open_high: bool
+    status: str
     volume: int = 0
-    temp_low: Optional[int] = None
-    temp_high: Optional[int] = None
     close_time: str = ""
 
 
 @dataclass
-class Orderbook:
-    """Parsed orderbook with yes bids/asks as [(price, quantity), ...]."""
-    yes_bids: list = field(default_factory=list)
-    yes_asks: list = field(default_factory=list)
-    ticker: str = ""
-
-    def best_bid(self) -> Optional[float]:
-        return self.yes_bids[0][0] if self.yes_bids else None
+class KalshiOrderbook:
+    ticker: str
+    yes_bids: list[dict] = field(default_factory=list)
+    yes_asks: list[dict] = field(default_factory=list)
 
     def best_ask(self) -> Optional[float]:
-        return self.yes_asks[0][0] if self.yes_asks else None
-
-    def spread(self) -> float:
-        b, a = self.best_bid(), self.best_ask()
-        if b is not None and a is not None:
-            return a - b
-        return 1.0
-
-    def depth_within(self, cents: float = 0.02) -> float:
-        """Total USD available within `cents` of best ask."""
         if not self.yes_asks:
-            return 0.0
-        ref = self.yes_asks[0][0]
-        total = 0.0
-        for price, qty in self.yes_asks:
-            if price <= ref + cents:
-                total += price * qty
-            else:
-                break
-        return total
+            return None
+        return min(entry["price"] for entry in self.yes_asks)
+
+    def best_bid(self) -> Optional[float]:
+        if not self.yes_bids:
+            return None
+        return max(entry["price"] for entry in self.yes_bids)
+
+    def spread(self) -> Optional[float]:
+        ask = self.best_ask()
+        bid = self.best_bid()
+        if ask is not None and bid is not None:
+            return ask - bid
+        return None
 
 
 class KalshiClient:
-    """Async Kalshi API client with RSA-PSS request signing."""
-
-    TEMP_SERIES_PREFIX = "KXTEMP"
-
     def __init__(self, key_id: str, private_key_pem: str, env: str = "demo"):
+        self.base_url = DEMO_BASE_URL if env == "demo" else PROD_BASE_URL
         self.key_id = key_id
-        self.env = env
-        self.base_url = PROD_BASE if env == "prod" else DEMO_BASE
-        self.ws_url = PROD_WS if env == "prod" else DEMO_WS
+        self._private_key = self._load_private_key(private_key_pem)
+        self._last_request_time = 0.0
+        self._http = httpx.AsyncClient(timeout=REQUEST_TIMEOUT)
+        self._semaphore = asyncio.Semaphore(2)  # max 2 concurrent requests to stay under 10/s
 
-        self._private_key = None
-        if private_key_pem:
-            pem = private_key_pem
-            if "\\n" in pem:
-                pem = pem.replace("\\n", "\n")
-            if not pem.startswith("-----"):
-                pem = f"-----BEGIN RSA PRIVATE KEY-----\n{pem}\n-----END RSA PRIVATE KEY-----"
+    def _load_private_key(self, pem_or_path: str):
+        if not pem_or_path or pem_or_path == "PLACEHOLDER_PEM":
+            logger.warning("No Kalshi private key configured — running in read-only mode")
+            return None
+
+        # If it looks like a file path, read from disk
+        import os
+        if os.path.isfile(pem_or_path):
             try:
-                self._private_key = serialization.load_pem_private_key(
-                    pem.encode(), password=None
-                )
+                with open(pem_or_path, "r") as f:
+                    pem = f.read()
+                logger.info("Loaded private key from file: %s", pem_or_path)
             except Exception as e:
-                logger.error("Failed to load private key: %s", e)
+                logger.error("Failed to read key file %s: %s", pem_or_path, e)
+                return None
+        else:
+            pem = pem_or_path
 
-        self._client = httpx.AsyncClient(timeout=15.0)
-        self._sem = asyncio.Semaphore(2)
-        self._last_request = 0.0
-        self._min_interval = 0.12
+        pem = pem.replace("\\n", "\n")
+        if not pem.strip().startswith("-----"):
+            logger.warning("Invalid PEM format for private key")
+            return None
+        try:
+            return serialization.load_pem_private_key(pem.encode(), password=None)
+        except Exception as e:
+            logger.error("Failed to load private key: %s", e)
+            return None
 
-    # ------------------------------------------------------------------
-    # Auth helpers
-    # ------------------------------------------------------------------
-    def _sign_request(self, method: str, path: str, timestamp_ms: int) -> str:
-        msg = f"{timestamp_ms}{method}{path}"
-        digest = hashlib.sha256(msg.encode()).digest()
-        sig = self._private_key.sign(
-            digest,
+    def _sign_request(self, method: str, path: str) -> dict:
+        timestamp_ms = str(int(time.time() * 1000))
+        path_no_query = path.split("?")[0]
+        # Kalshi requires the FULL path (including /trade-api/v2) in the signature
+        full_path = "/trade-api/v2" + path_no_query
+        message = f"{timestamp_ms}{method.upper()}{full_path}".encode()
+
+        if self._private_key is None:
+            return {}
+
+        signature = self._private_key.sign(
+            message,
             padding.PSS(
                 mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH,
+                salt_length=padding.PSS.DIGEST_LENGTH,
             ),
-            crypto_utils.Prehashed(hashes.SHA256()),
+            hashes.SHA256(),
         )
-        return base64.b64encode(sig).decode()
-
-    def _auth_headers(self, method: str, path: str) -> dict:
-        ts = int(time.time() * 1000)
-        sig = self._sign_request(method.upper(), path, ts)
+        sig_b64 = base64.b64encode(signature).decode()
         return {
             "KALSHI-ACCESS-KEY": self.key_id,
-            "KALSHI-ACCESS-SIGNATURE": sig,
-            "KALSHI-ACCESS-TIMESTAMP": str(ts),
-            "Content-Type": "application/json",
+            "KALSHI-ACCESS-SIGNATURE": sig_b64,
+            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
         }
 
-    # ------------------------------------------------------------------
-    # HTTP wrappers with rate limiting
-    # ------------------------------------------------------------------
     async def _rate_limit(self):
-        now = time.monotonic()
-        elapsed = now - self._last_request
-        if elapsed < self._min_interval:
-            await asyncio.sleep(self._min_interval - elapsed)
-        self._last_request = time.monotonic()
+        elapsed = time.time() - self._last_request_time
+        if elapsed < MIN_REQUEST_INTERVAL:
+            await asyncio.sleep(MIN_REQUEST_INTERVAL - elapsed)
+        self._last_request_time = time.time()
 
-    async def _get(self, path: str, params: dict = None) -> dict:
-        async with self._sem:
-            await self._rate_limit()
-            full_path = f"/trade-api/v2{path}"
-            headers = self._auth_headers("GET", full_path) if self._private_key else {}
-            url = f"{self.base_url}{path}"
-            resp = await self._client.get(url, headers=headers, params=params)
+    async def _get(self, path: str, params: dict | None = None) -> dict:
+        async with self._semaphore:
+            url = self.base_url + path
+            headers = {"Content-Type": "application/json"}
+            headers.update(self._sign_request("GET", path))
+
+            for attempt in range(3):
+                await self._rate_limit()
+                resp = await self._http.get(url, headers=headers, params=params)
+                if resp.status_code != 429:
+                    resp.raise_for_status()
+                    return resp.json()
+
+                retry_after = resp.headers.get("Retry-After")
+                delay = float(retry_after) if retry_after else (1.0 * (2 ** attempt))
+                logger.warning("Rate limit on %s; retrying in %.1fs", path, delay)
+                await asyncio.sleep(delay)
+
             resp.raise_for_status()
-            return resp.json()
+        return resp.json()
 
     async def _post(self, path: str, body: dict) -> dict:
-        async with self._sem:
+        async with self._semaphore:
             await self._rate_limit()
-            full_path = f"/trade-api/v2{path}"
-            headers = self._auth_headers("POST", full_path) if self._private_key else {}
-            url = f"{self.base_url}{path}"
-            resp = await self._client.post(url, headers=headers, json=body)
+            url = self.base_url + path
+            headers = {"Content-Type": "application/json"}
+            headers.update(self._sign_request("POST", path))
+            resp = await self._http.post(url, headers=headers, json=body)
             resp.raise_for_status()
             return resp.json()
 
     async def _delete(self, path: str) -> dict:
-        async with self._sem:
+        async with self._semaphore:
             await self._rate_limit()
-            full_path = f"/trade-api/v2{path}"
-            headers = self._auth_headers("DELETE", full_path) if self._private_key else {}
-            url = f"{self.base_url}{path}"
-            resp = await self._client.delete(url, headers=headers)
+            url = self.base_url + path
+            headers = {"Content-Type": "application/json"}
+            headers.update(self._sign_request("DELETE", path))
+            resp = await self._http.delete(url, headers=headers)
             resp.raise_for_status()
-            return resp.json()
-
-    async def close(self):
-        await self._client.aclose()
+            return resp.json() if resp.content else {}
 
     # ------------------------------------------------------------------
-    # Price parsing helpers
+    # Market discovery
     # ------------------------------------------------------------------
+
+    async def get_events_for_series(self, series_ticker: str) -> list[dict]:
+        try:
+            data = await self._get("/events", params={"series_ticker": series_ticker, "status": "open"})
+            return data.get("events", [])
+        except Exception as e:
+            logger.error("Failed to get events for series %s: %s", series_ticker, e)
+            return []
+
+    def _format_event_ticker_for_date(self, series_ticker: str, date_value: datetime.date) -> str:
+        return f"{series_ticker}-{date_value.strftime('%y%b%d').upper()}"
+
+    async def get_event_for_date(self, series_ticker: str, target_date: datetime.date) -> Optional[str]:
+        """Find the event ticker for a specific date.
+
+        Kalshi close_time for a daily temperature market is ~midnight UTC at the end
+        of the measurement day. So event_date == close_time_ET.date() - 1 day.
+        """
+        expected_close_date = target_date + datetime.timedelta(days=1)
+
+        events = await self.get_events_for_series(series_ticker)
+        for event in events:
+            close_time = event.get("close_time", "")
+            if not close_time:
+                continue
+            try:
+                close_dt = datetime.datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+                if close_dt.tzinfo is None:
+                    close_dt = close_dt.replace(tzinfo=datetime.timezone.utc)
+                close_date_et = close_dt.astimezone(KALSHI_MARKET_TZ).date()
+                if close_date_et == expected_close_date:
+                    return event["event_ticker"]
+            except (ValueError, KeyError):
+                continue
+
+        fallback = self._format_event_ticker_for_date(series_ticker, target_date)
+        logger.warning("No event found for %s on %s; falling back to %s",
+                        series_ticker, target_date, fallback)
+        return fallback
+
+    async def get_markets_for_event(self, event_ticker: str) -> list[KalshiMarket]:
+        markets_raw: list[dict] = []
+        try:
+            data = await self._get("/markets", params={"event_ticker": event_ticker, "status": "open"})
+            markets_raw = data.get("markets", [])
+        except Exception as e:
+            logger.error("Failed to get markets for event %s: %s", event_ticker, e)
+            return []
+
+        result = []
+        for m in markets_raw:
+            try:
+                yes_ask = self._parse_dollar_price(m, "yes_ask_dollars", "yes_ask")
+                yes_bid = self._parse_dollar_price(m, "yes_bid_dollars", "yes_bid")
+                subtitle = m.get("yes_sub_title") or m.get("subtitle") or ""
+                temp_low, temp_high, is_open_low, is_open_high = self._parse_bounds_from_market(m)
+
+                market_status = (m.get("status", "").lower() or "open")
+                if market_status not in {"open", "active"}:
+                    continue
+
+                result.append(KalshiMarket(
+                    ticker=m["ticker"],
+                    event_ticker=event_ticker,
+                    yes_ask=yes_ask,
+                    yes_bid=yes_bid,
+                    yes_sub_title=subtitle,
+                    temp_low=temp_low,
+                    temp_high=temp_high,
+                    is_open_low=is_open_low,
+                    is_open_high=is_open_high,
+                    status=market_status,
+                    volume=self._parse_volume(m),
+                    close_time=m.get("close_time", ""),
+                ))
+            except Exception as e:
+                logger.debug("Skipping market %s: %s", m.get("ticker", "?"), e)
+                continue
+
+        return result
+
+    async def get_markets_for_series_date(self, series_ticker: str,
+                                           target_date: datetime.date) -> list[KalshiMarket]:
+        """Get all markets for a series filtered to a specific date."""
+        expected_close_date = target_date + datetime.timedelta(days=1)
+
+        markets_raw: list[dict] = []
+        try:
+            data = await self._get("/markets", params={"series_ticker": series_ticker, "status": "open"})
+            markets_raw = data.get("markets", [])
+        except Exception as e:
+            logger.error("Failed to get markets for series %s: %s", series_ticker, e)
+            return []
+
+        filtered = []
+        for m in markets_raw:
+            close_time = m.get("close_time", "")
+            if not close_time:
+                continue
+            try:
+                close_dt = datetime.datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+                if close_dt.tzinfo is None:
+                    close_dt = close_dt.replace(tzinfo=datetime.timezone.utc)
+                if close_dt.astimezone(KALSHI_MARKET_TZ).date() != expected_close_date:
+                    continue
+            except ValueError:
+                continue
+
+            market_status = (m.get("status", "").lower() or "open")
+            if market_status not in {"open", "active"}:
+                continue
+            filtered.append(m)
+
+        result = []
+        for m in filtered:
+            try:
+                yes_ask = self._parse_dollar_price(m, "yes_ask_dollars", "yes_ask")
+                yes_bid = self._parse_dollar_price(m, "yes_bid_dollars", "yes_bid")
+                subtitle = m.get("yes_sub_title") or m.get("subtitle") or ""
+                temp_low, temp_high, is_open_low, is_open_high = self._parse_bounds_from_market(m)
+
+                result.append(KalshiMarket(
+                    ticker=m["ticker"],
+                    event_ticker=str(m.get("event_ticker", "")),
+                    yes_ask=yes_ask,
+                    yes_bid=yes_bid,
+                    yes_sub_title=subtitle,
+                    temp_low=temp_low,
+                    temp_high=temp_high,
+                    is_open_low=is_open_low,
+                    is_open_high=is_open_high,
+                    status=market_status,
+                    volume=self._parse_volume(m),
+                    close_time=m.get("close_time", ""),
+                ))
+            except Exception as e:
+                logger.debug("Skipping market %s: %s", m.get("ticker", "?"), e)
+                continue
+
+        return result
+
     def _parse_volume(self, raw: dict) -> int:
-        """Parse volume from volume_fp (string) or volume (int)."""
+        """Parse volume from volume_fp (string) or legacy volume (int)."""
         vfp = raw.get("volume_fp")
         if vfp is not None:
             try:
@@ -185,7 +333,7 @@ class KalshiClient:
         return int(raw.get("volume", 0))
 
     def _parse_dollar_price(self, raw: dict, field: str, legacy_field: str = "") -> float:
-        """Parse dollar price field (string) with fallback to legacy cents field."""
+        """Parse a dollar-string price field, falling back to legacy cents field."""
         val = raw.get(field)
         if val is not None:
             try:
@@ -197,207 +345,177 @@ class KalshiClient:
             if val is not None:
                 try:
                     v = float(val)
-                    if v >= 1:
-                        return v / 100.0
-                    return v
+                    return v / 100.0 if v > 1 else v
                 except (ValueError, TypeError):
                     pass
         return 0.0
 
-    # ------------------------------------------------------------------
-    # Temperature market helpers
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _parse_temp_range(title: str) -> tuple[Optional[int], Optional[int]]:
-        """Extract temp range from market title like 'Between 50°F and 59°F'."""
-        import re
-        m = re.search(r"(\d+)\s*°?\s*F?\s*(?:and|to|-)\s*(\d+)\s*°?\s*F?", title)
+    def _parse_temp_range(self, subtitle: str) -> tuple[Optional[float], Optional[float], bool, bool]:
+        s = subtitle.strip().replace("\u00b0", "°").replace("\u02da", "°")
+        DEG = r"[°]?\s*"
+        NUM = r"(\d+(?:\.\d+)?)"
+
+        m = re.match(rf"{NUM}{DEG}(?:to|-)\s*{NUM}{DEG}$", s, re.IGNORECASE)
         if m:
-            return int(m.group(1)), int(m.group(2))
-        m = re.search(r"(\d+)\s*°?\s*F?\s*or\s*(higher|lower|above|below)", title, re.IGNORECASE)
+            return float(m.group(1)), float(m.group(2)), False, False
+
+        m = re.match(rf"{NUM}{DEG}or\s+(?:below|lower)\s*$", s, re.IGNORECASE)
         if m:
-            temp = int(m.group(1))
-            direction = m.group(2).lower()
-            if direction in ("higher", "above"):
-                return temp, temp + 20
-            else:
-                return temp - 20, temp
-        return None, None
+            return None, float(m.group(1)), True, False
 
-    # ------------------------------------------------------------------
-    # Market discovery
-    # ------------------------------------------------------------------
-    async def get_active_temp_series(self) -> list[str]:
-        """Find all active temperature-related event series."""
-        try:
-            data = await self._get("/events", params={
-                "status": "open",
-                "series_ticker": self.TEMP_SERIES_PREFIX,
-                "limit": 200,
-            })
-            events = data.get("events", [])
-            series = set()
-            for ev in events:
-                st = ev.get("series_ticker", "")
-                if st.startswith(self.TEMP_SERIES_PREFIX):
-                    series.add(st)
-            return sorted(series)
-        except Exception as e:
-            logger.error("Failed to fetch temp series: %s", e)
-            return []
+        m = re.match(rf"{NUM}{DEG}or\s+(?:above|higher)\s*$", s, re.IGNORECASE)
+        if m:
+            return float(m.group(1)), None, False, True
 
-    async def get_events_for_series(self, series_ticker: str) -> list[dict]:
-        """Fetch all open events for a given series ticker."""
-        try:
-            data = await self._get("/events", params={
-                "status": "open",
-                "series_ticker": series_ticker,
-                "limit": 100,
-            })
-            return data.get("events", [])
-        except Exception as e:
-            logger.error("Failed to fetch events for %s: %s", series_ticker, e)
-            return []
+        m = re.match(rf"(?:below|under)\s+{NUM}{DEG}$", s, re.IGNORECASE)
+        if m:
+            return None, float(m.group(1)), True, False
 
-    async def get_markets_for_event(self, event_ticker: str) -> list[KalshiMarket]:
-        """Fetch all markets (bins) for a given event."""
-        try:
-            data = await self._get("/markets", params={
-                "event_ticker": event_ticker,
-                "limit": 100,
-            })
-            markets = []
-            for m in data.get("markets", []):
-                if m.get("status") != "open":
-                    continue
-                yes_bid = self._parse_dollar_price(m, "yes_bid_dollars", "yes_bid")
-                yes_ask = self._parse_dollar_price(m, "yes_ask_dollars", "yes_ask")
-                no_bid = self._parse_dollar_price(m, "no_bid_dollars", "no_bid")
-                no_ask = self._parse_dollar_price(m, "no_ask_dollars", "no_ask")
-                yes_price = (yes_bid + yes_ask) / 2 if yes_bid and yes_ask else yes_bid or yes_ask
-                no_price = (no_bid + no_ask) / 2 if no_bid and no_ask else no_bid or no_ask
-                spread = abs(yes_ask - yes_bid) if yes_bid and yes_ask else 1.0
-                temp_low, temp_high = self._parse_temp_range(
-                    m.get("title", "") or m.get("subtitle", "")
-                )
-                markets.append(KalshiMarket(
-                    ticker=m["ticker"],
-                    event_ticker=event_ticker,
-                    question=m.get("title", "") or m.get("subtitle", ""),
-                    yes_price=yes_price,
-                    no_price=no_price,
-                    yes_bid=yes_bid,
-                    yes_ask=yes_ask,
-                    spread=spread,
-                    volume=self._parse_volume(m),
-                    temp_low=temp_low,
-                    temp_high=temp_high,
-                    close_time=m.get("close_time", ""),
-                ))
-            return sorted(markets, key=lambda x: (x.temp_low or 0))
-        except Exception as e:
-            logger.error("Failed to fetch markets for event %s: %s", event_ticker, e)
-            return []
+        m = re.match(rf"(?:above|over)\s+{NUM}{DEG}$", s, re.IGNORECASE)
+        if m:
+            return float(m.group(1)), None, False, True
 
-    async def get_markets_for_series_date(self, series_ticker: str,
-                                           date_str: str) -> list[KalshiMarket]:
-        """Fetch markets for a series+date combo (e.g., KXTEMPMIA, 2026-03-31)."""
-        events = await self.get_events_for_series(series_ticker)
-        target_events = []
-        for ev in events:
-            et = ev.get("event_ticker", "")
-            if date_str.replace("-", "") in et or date_str in et:
-                target_events.append(et)
+        m = re.match(rf"{NUM}{DEG}$", s)
+        if m:
+            val = float(m.group(1))
+            return val - 0.5, val + 0.5, False, False
 
-        all_markets = []
-        for et in target_events:
-            markets = await self.get_markets_for_event(et)
-            all_markets.extend(markets)
-        return all_markets
+        return None, None, False, False
+
+    def _parse_bounds_from_market(self, raw: dict) -> tuple[Optional[float], Optional[float], bool, bool]:
+        strike = raw.get("floor_strike")
+        strike_type = (raw.get("strike_type") or "").lower()
+
+        if strike is not None and strike_type:
+            s = float(strike)
+            if strike_type == "greater":
+                return s + 1.0, None, False, True
+            if strike_type == "between":
+                ceil_strike = raw.get("ceil_strike")
+                if ceil_strike is not None:
+                    return s, float(ceil_strike), False, False
+                subtitle = raw.get("yes_sub_title") or raw.get("subtitle") or ""
+                _, temp_high, _, _ = self._parse_temp_range(subtitle)
+                return s, temp_high, False, False
+            if strike_type == "less":
+                return None, s - 1.0, True, False
+
+        subtitle = raw.get("yes_sub_title") or raw.get("subtitle") or ""
+        return self._parse_temp_range(subtitle)
 
     # ------------------------------------------------------------------
     # Orderbook
     # ------------------------------------------------------------------
-    async def get_orderbook(self, ticker: str) -> Optional[Orderbook]:
-        """Fetch orderbook for a single market."""
+
+    async def get_market(self, ticker: str) -> Optional[dict]:
         try:
-            data = await self._get(f"/orderbook/{ticker}")
-            ob = data.get("orderbook", data)
-
-            yes_bids = []
-            yes_asks = []
-
-            for entry in ob.get("yes", []):
-                price = float(entry.get("price_dollars", entry.get("price", 0)))
-                if price >= 1:
-                    price = price / 100.0
-                qty = int(float(entry.get("quantity_fp", entry.get("quantity", 0))))
-                if entry.get("side") == "bid" or "bid" in str(entry):
-                    yes_bids.append((price, qty))
-                else:
-                    yes_asks.append((price, qty))
-
-            for entry in ob.get("no", []):
-                price = float(entry.get("price_dollars", entry.get("price", 0)))
-                if price >= 1:
-                    price = price / 100.0
-                qty = int(float(entry.get("quantity_fp", entry.get("quantity", 0))))
-                no_price = price
-                yes_equiv = 1.0 - no_price
-                if entry.get("side") == "bid" or "bid" in str(entry):
-                    yes_asks.append((yes_equiv, qty))
-                else:
-                    yes_bids.append((yes_equiv, qty))
-
-            yes_bids.sort(key=lambda x: -x[0])
-            yes_asks.sort(key=lambda x: x[0])
-
-            return Orderbook(yes_bids=yes_bids, yes_asks=yes_asks, ticker=ticker)
+            data = await self._get(f"/markets/{ticker}")
+            return data.get("market", data)
         except Exception as e:
-            logger.error("Failed to fetch orderbook for %s: %s", ticker, e)
+            logger.error("Failed to get market %s: %s", ticker, e)
             return None
+
+    async def get_orderbook(self, ticker: str, depth: int = 10) -> Optional[KalshiOrderbook]:
+        try:
+            data = await self._get(f"/markets/{ticker}/orderbook", params={"depth": depth})
+
+            # Kalshi API returns orderbook_fp with yes_dollars/no_dollars
+            # Each entry is [price_string, quantity_string] in dollar decimals
+            ob_fp = data.get("orderbook_fp", {})
+            yes_dollars = ob_fp.get("yes_dollars", []) or []
+            no_dollars = ob_fp.get("no_dollars", []) or []
+
+            logger.debug("Orderbook for %s: %d yes levels, %d no levels",
+                         ticker, len(yes_dollars), len(no_dollars))
+
+            # yes_dollars = YES bids (people willing to buy YES at this price)
+            yes_bids = [
+                {"price": float(entry[0]), "quantity": float(entry[1])}
+                for entry in yes_dollars
+            ]
+
+            # no_dollars = NO bids; to derive YES asks: yes_ask = 1.0 - no_bid
+            yes_asks = [
+                {"price": 1.0 - float(entry[0]), "quantity": float(entry[1])}
+                for entry in no_dollars
+            ]
+
+            return KalshiOrderbook(ticker=ticker, yes_bids=yes_bids, yes_asks=yes_asks)
+        except Exception as e:
+            logger.error("Failed to get orderbook for %s: %s", ticker, e)
+            return None
+
+    async def get_orderbooks_batch(self, tickers: list[str]) -> dict[str, KalshiOrderbook]:
+        """Fetch up to 100 orderbooks in a single API call."""
+        result = {}
+        if not tickers:
+            return result
+        try:
+            # Kalshi expects repeated tickers= params
+            params = [("tickers", t) for t in tickers[:100]]
+            # Build query string manually since httpx params dict doesn't support repeated keys
+            query = "&".join(f"tickers={t}" for t in tickers[:100])
+            data = await self._get(f"/markets/orderbooks?{query}")
+
+            for item in data.get("orderbooks", []):
+                ticker = item.get("ticker", "")
+                ob_fp = item.get("orderbook_fp", {})
+                yes_dollars = ob_fp.get("yes_dollars", []) or []
+                no_dollars = ob_fp.get("no_dollars", []) or []
+
+                yes_bids = [
+                    {"price": float(entry[0]), "quantity": float(entry[1])}
+                    for entry in yes_dollars
+                ]
+                yes_asks = [
+                    {"price": 1.0 - float(entry[0]), "quantity": float(entry[1])}
+                    for entry in no_dollars
+                ]
+                result[ticker] = KalshiOrderbook(ticker=ticker, yes_bids=yes_bids, yes_asks=yes_asks)
+
+            logger.debug("Batch orderbook: %d/%d tickers returned", len(result), len(tickers))
+        except Exception as e:
+            logger.error("Failed to get batch orderbooks: %s", e)
+        return result
 
     # ------------------------------------------------------------------
     # Portfolio
     # ------------------------------------------------------------------
-    async def get_balance(self) -> Optional[float]:
+
+    async def get_balance(self) -> float:
+        if self._private_key is None:
+            return 0.0
         try:
             data = await self._get("/portfolio/balance")
-            bal = data.get("balance")
-            if bal is not None:
-                return float(bal) / 100.0
-            bal_fp = data.get("balance_fp")
-            if bal_fp is not None:
-                return float(bal_fp)
-            return None
+            balance_cents = data.get("balance", 0)
+            return balance_cents / 100.0
         except Exception as e:
-            logger.error("Failed to fetch balance: %s", e)
-            return None
+            logger.error("Failed to get balance: %s", e)
+            return 0.0
 
     async def get_positions(self) -> list[dict]:
+        if self._private_key is None:
+            return []
         try:
-            data = await self._get("/portfolio/positions", params={"limit": 200})
-            positions = data.get("market_positions", [])
-            return positions
+            data = await self._get("/portfolio/positions")
+            return data.get("market_positions", [])
         except Exception as e:
             logger.error("Failed to fetch positions: %s", e)
             return []
 
-    async def get_settlements(self, ticker: str) -> Optional[dict]:
+    async def get_open_orders(self) -> list[dict]:
+        if self._private_key is None:
+            return []
         try:
-            data = await self._get(f"/markets/{ticker}")
-            market = data.get("market", data)
-            if market.get("result"):
-                return {"result": market["result"], "status": market.get("status")}
-            return None
+            data = await self._get("/portfolio/orders", params={"status": "resting"})
+            return data.get("orders", [])
         except Exception as e:
-            logger.error("Failed to fetch settlement for %s: %s", ticker, e)
-            return None
+            logger.error("Failed to fetch open orders: %s", e)
+            return []
 
-    # ------------------------------------------------------------------
-    # Order status
-    # ------------------------------------------------------------------
     async def get_order_status(self, order_id: str) -> Optional[dict]:
+        if self._private_key is None:
+            return None
         try:
             data = await self._get(f"/portfolio/orders/{order_id}")
             return data.get("order", data)
@@ -406,17 +524,15 @@ class KalshiClient:
             return None
 
     # ------------------------------------------------------------------
-    # Order placement
+    # Order response parsing
     # ------------------------------------------------------------------
 
     @staticmethod
     def parse_order_response(result: dict) -> dict:
         """Extract standardized fill info from a Kalshi order response.
 
-        Returns dict with:
-          order_id, status, fill_count, remaining_count,
-          taker_fill_cost, maker_fill_cost, taker_fees, maker_fees,
-          no_price_dollars, yes_price_dollars
+        Kalshi returns fill data as fixed-point strings (e.g., fill_count_fp,
+        taker_fill_cost_dollars). This method parses them into usable numbers.
         """
         order = result.get("order", {})
 
@@ -442,6 +558,10 @@ class KalshiClient:
             "yes_price_dollars": _fp(order.get("yes_price_dollars")),
         }
 
+    # ------------------------------------------------------------------
+    # Order placement
+    # ------------------------------------------------------------------
+
     async def place_order(
         self,
         ticker: str,
@@ -455,8 +575,8 @@ class KalshiClient:
     ) -> Optional[dict]:
         """Place an order on Kalshi.
 
-        Accepts EITHER no_price_cents or yes_price_cents (one must be provided).
-        Returns raw API response dict.
+        Accepts EITHER no_price_cents or yes_price_cents (one required).
+        Use no_price_cents for NO orders, yes_price_cents for YES orders.
         """
         if client_order_id is None:
             client_order_id = str(uuid.uuid4())
@@ -470,7 +590,7 @@ class KalshiClient:
             "client_order_id": client_order_id,
         }
 
-        # Price: prefer no_price for NO orders, yes_price for YES orders
+        # Price: send no_price or yes_price directly
         if no_price_cents is not None:
             if no_price_cents < 1 or no_price_cents > 99:
                 logger.error("no_price_cents %d out of range [1,99] for %s", no_price_cents, ticker)
@@ -517,3 +637,22 @@ class KalshiClient:
         except httpx.HTTPStatusError as e:
             logger.error("Failed to cancel order %s: %s", order_id, e)
             return {}
+
+    # ------------------------------------------------------------------
+    # Convenience
+    # ------------------------------------------------------------------
+
+    async def get_city_markets(self, series_ticker: str,
+                                target_date: datetime.date) -> list[KalshiMarket]:
+        """End-to-end market discovery for a specific date."""
+        markets = await self.get_markets_for_series_date(series_ticker, target_date)
+        if markets:
+            return markets
+
+        event_ticker = await self.get_event_for_date(series_ticker, target_date)
+        if event_ticker is None:
+            return []
+        return await self.get_markets_for_event(event_ticker)
+
+    async def close(self):
+        await self._http.aclose()
