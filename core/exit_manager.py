@@ -67,6 +67,12 @@ class ExitManager:
     async def run(self):
         """Main loop: read from price_queue and evaluate exits.
         Falls back to REST polling when WS is down."""
+        # Immediate check on startup — catch positions that moved while bot was down
+        if self._positions:
+            logger.info("Exit manager: initial poll of %d positions", len(self._positions))
+            await self._poll_all()
+
+        poll_counter = 0
         while True:
             try:
                 # Try to get WS price updates with timeout
@@ -83,8 +89,14 @@ class ExitManager:
                             # Delta update without prices — fetch from REST
                             await self._poll_single(ticker)
                 except asyncio.TimeoutError:
-                    # Fallback: poll all monitored positions via REST
-                    if not self.ws.is_connected and self._positions:
+                    pass
+
+                # Periodic REST poll every 60s as safety net
+                # (catches illiquid markets with no WS updates)
+                poll_counter += 1
+                if poll_counter >= (60 / max(1, self.config.exit_check_interval_seconds)):
+                    poll_counter = 0
+                    if self._positions:
                         await self._poll_all()
 
             except asyncio.CancelledError:
