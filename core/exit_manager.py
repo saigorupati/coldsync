@@ -3,9 +3,9 @@ Exit Manager — monitors open positions and executes staged exits
 based on price change from entry.
 
 Replaces heatsync's hedge mechanism with simpler scale-out rules:
-  Stage 1 (loss >= 10%): sell 33% of NO position
-  Stage 2 (loss >= 20%): sell 66% of remaining
-  Stage 3 (loss >= 30%): sell 100% (full exit)
+  Stage 1 (loss >= 20%): sell 33% of NO position
+  Stage 2 (loss >= 30%): sell 66% of remaining
+  Stage 3 (loss >= 40%): sell 100% (full exit)
 """
 
 import asyncio
@@ -121,12 +121,12 @@ class ExitManager:
 
         loss_pct = (pos.entry_price_no - current_no_price) / pos.entry_price_no
 
-        if loss_pct >= 0.30 and pos.exit_stage < 3 and self.config.exit_down_30_full_exit:
-            await self._execute_exit(pos, 1.0, 3, "full_exit_30pct", current_no_price)
-        elif loss_pct >= 0.20 and pos.exit_stage < 2:
-            await self._execute_exit(pos, self.config.exit_down_20_cut_pct, 2, "cut_heavy_20pct", current_no_price)
-        elif loss_pct >= 0.10 and pos.exit_stage < 1 and self.config.exit_down_10_cut_pct > 0:
-            await self._execute_exit(pos, self.config.exit_down_10_cut_pct, 1, "cut_some_10pct", current_no_price)
+        if loss_pct >= 0.40 and pos.exit_stage < 3 and self.config.exit_down_30_full_exit:
+            await self._execute_exit(pos, 1.0, 3, "full_exit_40pct", current_no_price)
+        elif loss_pct >= 0.30 and pos.exit_stage < 2:
+            await self._execute_exit(pos, self.config.exit_down_20_cut_pct, 2, "cut_heavy_30pct", current_no_price)
+        elif loss_pct >= 0.20 and pos.exit_stage < 1:
+            await self._execute_exit(pos, self.config.exit_down_10_cut_pct, 1, "cut_some_20pct", current_no_price)
 
     async def _execute_exit(self, pos: MonitoredPosition, cut_fraction: float,
                              stage: int, reason: str, current_no_price: float):

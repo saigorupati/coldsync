@@ -18,9 +18,9 @@ const RISK_PARAMS = [
   { label: 'Scale Up Factor', value: '1.10x' },
   { label: 'Scale Down Trigger', value: '2 daily losses' },
   { label: 'Scale Down Factor', value: '0.75x for 48h' },
-  { label: 'Exit Stage 1', value: 'Disabled' },
-  { label: 'Exit Stage 2', value: '-20% -> sell 50%' },
-  { label: 'Exit Stage 3', value: '-30% -> full exit' },
+  { label: 'Exit Stage 1', value: '-20% -> sell 33%' },
+  { label: 'Exit Stage 2', value: '-30% -> sell 66%' },
+  { label: 'Exit Stage 3', value: '-40% -> full exit' },
 ]
 
 export default async function RiskPage() {
