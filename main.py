@@ -94,7 +94,7 @@ async def main():
     tier_classifier = TierClassifier(config)
     sizer = PositionSizer(config)
     executor = OrderExecutor(config, kalshi, db, discord)
-    positions = PositionManager(config, kalshi, db, discord)
+    positions = PositionManager(config, kalshi, db, discord, ws=ws)
     risk = RiskController(config, db)
     exit_mgr = ExitManager(config, kalshi, ws, db, discord, price_queue)
 
