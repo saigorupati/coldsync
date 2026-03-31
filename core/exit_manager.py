@@ -186,10 +186,17 @@ class ExitManager:
             # Don't advance stage if we couldn't sell — will retry next evaluation
             return
 
-        # Actual sell price per contract (what we received, after fees)
-        sell_proceeds = fill_cost - total_fees  # fees reduce what we get back
-        actual_sell_price = sell_proceeds / filled_count if filled_count > 0 else current_no_price
+        # IMPORTANT: For SELL NO orders, taker_fill_cost reports the YES-side cost
+        # (what the counterparty paid for YES), NOT our NO proceeds.
+        # Our NO proceeds = filled_count * $1.00 - yes_side_cost = $1.00 - fill_cost
+        # Then subtract fees.
+        no_proceeds = filled_count * 1.0 - fill_cost  # $1 per contract minus YES cost
+        sell_proceeds_after_fees = no_proceeds - total_fees
+        actual_sell_price = sell_proceeds_after_fees / filled_count if filled_count > 0 else current_no_price
         realized_pnl = (actual_sell_price - pos.entry_price_no) * filled_count
+
+        logger.info("Exit fill %s: %d contracts, yes_cost=$%.4f, no_proceeds=$%.4f, fees=$%.4f, sell_price=%.1fc",
+                     ticker, filled_count, fill_cost, no_proceeds, total_fees, actual_sell_price * 100)
         cost_removed = pos.entry_price_no * filled_count
 
         # Update position
