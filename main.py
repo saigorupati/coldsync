@@ -267,12 +267,12 @@ async def main():
                     )
                     await discord.send_daily_summary(data)
                     await db.save_daily_pnl(data)
-                    await db.cleanup_old_scans(keep_hours=48)
+                    await db.cleanup_old_scans(keep_hours=48, active_cities=config.whitelisted_cities)
                     last_daily_summary = now
 
                 # 7. Periodic scan_results cleanup (every 10 scans ≈ 10 min)
                 if scan_count % 10 == 0:
-                    await db.cleanup_old_scans(keep_hours=6)
+                    await db.cleanup_old_scans(keep_hours=6, active_cities=config.whitelisted_cities)
 
                 if trades_this_scan > 0:
                     logger.info("Scan #%d: %d trades, %d resolutions",

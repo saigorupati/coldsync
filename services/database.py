@@ -290,12 +290,22 @@ class Database:
             row.get("tier"), row.get("order_size"),
             row.get("spread"), row.get("volume"), row.get("skip_reason", ""))
 
-    async def cleanup_old_scans(self, keep_hours: int = 24):
-        """Remove stale tickers (resolved markets, yesterday's data)."""
+    async def cleanup_old_scans(self, keep_hours: int = 24, active_cities: list[str] | None = None):
+        """Remove stale tickers (resolved markets, yesterday's data, non-active cities)."""
         await self.pool.execute(
             "DELETE FROM scan_results WHERE scanned_at < NOW() - make_interval(hours => $1)",
             keep_hours
         )
+        # Also remove rows for cities no longer in the whitelist
+        if active_cities:
+            city_prefixes = [f"{c}|" for c in active_cities]
+            await self.pool.execute("""
+                DELETE FROM scan_results
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM unnest($1::text[]) AS prefix
+                    WHERE city_date LIKE prefix || '%'
+                )
+            """, city_prefixes)
 
     async def get_risk_state(self) -> dict | None:
         row = await self.pool.fetchrow("SELECT * FROM risk_state WHERE id = 1")
