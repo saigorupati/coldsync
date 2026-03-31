@@ -77,9 +77,8 @@ CREATE TABLE IF NOT EXISTS frozen_cities (
 );
 
 CREATE TABLE IF NOT EXISTS scan_results (
-    id SERIAL PRIMARY KEY,
+    ticker TEXT PRIMARY KEY,
     city_date TEXT,
-    ticker TEXT,
     question TEXT,
     yes_price NUMERIC(8,4),
     no_price NUMERIC(8,4),

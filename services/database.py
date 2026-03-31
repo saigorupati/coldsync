@@ -260,14 +260,30 @@ class Database:
             data["wins"], data["losses"], data["daily_pnl"], data["cumulative_pnl"],
             data["no_win_rate"], data["phase"])
 
-    # --- Scan result logging ---
+    # --- Scan result logging (upsert — one row per ticker) ---
     async def log_scan_result(self, row: dict):
         await self.pool.execute("""
-            INSERT INTO scan_results (city_date, ticker, question, yes_price, no_price,
+            INSERT INTO scan_results (ticker, city_date, question, yes_price, no_price,
                                       prob_sum, excess, neighbor_ratio, com_distance, score,
-                                      tier, order_size, spread, volume, skip_reason)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-        """, row["city_date"], row["ticker"], row.get("question"),
+                                      tier, order_size, spread, volume, skip_reason, scanned_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, NOW())
+            ON CONFLICT (ticker) DO UPDATE SET
+                city_date = EXCLUDED.city_date,
+                question = EXCLUDED.question,
+                yes_price = EXCLUDED.yes_price,
+                no_price = EXCLUDED.no_price,
+                prob_sum = EXCLUDED.prob_sum,
+                excess = EXCLUDED.excess,
+                neighbor_ratio = EXCLUDED.neighbor_ratio,
+                com_distance = EXCLUDED.com_distance,
+                score = EXCLUDED.score,
+                tier = EXCLUDED.tier,
+                order_size = EXCLUDED.order_size,
+                spread = EXCLUDED.spread,
+                volume = EXCLUDED.volume,
+                skip_reason = EXCLUDED.skip_reason,
+                scanned_at = NOW()
+        """, row["ticker"], row["city_date"], row.get("question"),
             row.get("yes_price"), row.get("no_price"),
             row.get("prob_sum"), row.get("excess"),
             row.get("neighbor_ratio"), row.get("com_distance"), row.get("score"),
@@ -275,6 +291,7 @@ class Database:
             row.get("spread"), row.get("volume"), row.get("skip_reason", ""))
 
     async def cleanup_old_scans(self, keep_hours: int = 24):
+        """Remove stale tickers (resolved markets, yesterday's data)."""
         await self.pool.execute(
             "DELETE FROM scan_results WHERE scanned_at < NOW() - make_interval(hours => $1)",
             keep_hours

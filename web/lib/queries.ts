@@ -92,23 +92,9 @@ export async function getRecentTrades(limit: number = 50): Promise<Trade[]> {
 }
 
 export async function getLatestScanResults(): Promise<ScanResult[]> {
-  // Get the latest scan timestamp
-  const { rows: latestRows } = await pool.query(
-    'SELECT MAX(scanned_at) AS latest FROM scan_results'
-  )
-  const latestTime = latestRows[0]?.latest
-  if (!latestTime) return []
-
-  // Get distinct latest results per ticker within a 2-minute window
+  // Table is now one row per ticker (upsert), just read all current rows
   const { rows } = await pool.query(
-    `SELECT * FROM (
-       SELECT DISTINCT ON (ticker) *
-       FROM scan_results
-       WHERE scanned_at >= $1::timestamptz - interval '2 minutes'
-       ORDER BY ticker, scanned_at DESC
-     ) sub
-     ORDER BY city_date, score DESC`,
-    [latestTime]
+    `SELECT * FROM scan_results ORDER BY city_date, score DESC`
   )
 
   return rows.map((r) => ({
