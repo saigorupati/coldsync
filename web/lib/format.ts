@@ -68,17 +68,46 @@ export function exitStageLabel(stage: number): string {
   return labels[stage] || `Stage ${stage}`
 }
 
-// Kalshi URL builder — constructs link to market page
-// Ticker format: KXHIGHNY-26MAR31-B74.5
-// URL format: https://kalshi.com/markets/kxhighny-26mar31
+// Kalshi URL builder
+// Ticker: KXHIGHLAX-26MAR31-T67
+// URL: https://kalshi.com/markets/kxhighlax/highest-temperature-in-los-angeles/kxhighlax-26mar31
+
+const SERIES_SLUGS: Record<string, string> = {
+  KXHIGHNY: 'highest-temperature-in-new-york',
+  KXHIGHCHI: 'highest-temperature-in-chicago',
+  KXHIGHMIA: 'highest-temperature-in-miami',
+  KXHIGHLAX: 'highest-temperature-in-los-angeles',
+  KXHIGHDEN: 'highest-temperature-in-denver',
+  KXHIGHAUS: 'highest-temperature-in-austin',
+  KXHIGHTATL: 'highest-temperature-in-atlanta',
+  KXHIGHTBOS: 'highest-temperature-in-boston',
+  KXHIGHTDAL: 'highest-temperature-in-dallas',
+  KXHIGHTDC: 'highest-temperature-in-washington-dc',
+  KXHIGHTHOU: 'highest-temperature-in-houston',
+  KXHIGHTLV: 'highest-temperature-in-las-vegas',
+  KXHIGHTMIN: 'highest-temperature-in-minneapolis',
+  KXHIGHTNOLA: 'highest-temperature-in-new-orleans',
+  KXHIGHTOKC: 'highest-temperature-in-oklahoma-city',
+  KXHIGHTPHX: 'highest-temperature-in-phoenix',
+  KXHIGHPHIL: 'highest-temperature-in-philadelphia',
+  KXHIGHTSATX: 'highest-temperature-in-san-antonio',
+  KXHIGHTSEA: 'highest-temperature-in-seattle',
+  KXHIGHTSFO: 'highest-temperature-in-san-francisco',
+}
+
 export function kalshiMarketUrl(ticker: string): string {
-  // Extract event ticker (first two segments: KXHIGHNY-26MAR31)
   const parts = ticker.split('-')
-  if (parts.length >= 2) {
-    const eventTicker = parts.slice(0, 2).join('-').toLowerCase()
-    return `https://kalshi.com/markets/${eventTicker}`
+  if (parts.length < 2) return `https://kalshi.com/markets/${ticker.toLowerCase()}`
+
+  const series = parts[0].toUpperCase()
+  const eventTicker = parts.slice(0, 2).join('-').toLowerCase()
+  const seriesLower = series.toLowerCase()
+  const slug = SERIES_SLUGS[series]
+
+  if (slug) {
+    return `https://kalshi.com/markets/${seriesLower}/${slug}/${eventTicker}`
   }
-  return `https://kalshi.com/markets/${ticker.toLowerCase()}`
+  return `https://kalshi.com/markets/${seriesLower}/${eventTicker}`
 }
 
 // Badge color helpers for trade types
