@@ -51,7 +51,7 @@ class LocalOrderbook:
                 self.no_levels[price] = qty
         self.seq = seq
 
-    def apply_delta(self, side: str, price_dollars: str, delta_fp: str, seq: int):
+    def apply_delta(self, side: str, price_dollars: str, delta_fp: str):
         """Apply incremental delta to one side."""
         levels = self.yes_levels if side == "yes" else self.no_levels
         delta = float(delta_fp)
@@ -61,7 +61,6 @@ class LocalOrderbook:
             levels.pop(price_dollars, None)
         else:
             levels[price_dollars] = new_qty
-        self.seq = seq
 
     def best_yes_bid(self) -> float | None:
         if not self.yes_levels:
@@ -367,7 +366,6 @@ class KalshiWebSocket:
     async def _handle_orderbook_delta(self, msg: dict):
         inner = msg.get("msg", {})
         ticker = inner.get("market_ticker", "")
-        seq = msg.get("seq", 0)
         if not ticker or ticker not in self.orderbooks:
             return
 
@@ -379,13 +377,7 @@ class KalshiWebSocket:
             return
 
         ob = self.orderbooks[ticker]
-
-        # Check for sequence gap — need re-snapshot
-        if seq != ob.seq + 1:
-            logger.warning("OB seq gap for %s: expected %d, got %d",
-                           ticker, ob.seq + 1, seq)
-            # Could request re-snapshot here, for now just apply
-        ob.apply_delta(side, price_dollars, delta_fp, seq)
+        ob.apply_delta(side, price_dollars, delta_fp)
 
         # Push updated price to exit manager
         yes_bid = ob.best_yes_bid()
