@@ -23,10 +23,10 @@ class MonitoredPosition:
     ticker: str
     entry_price_no: float      # price we paid per NO contract (e.g., 0.95)
     no_contracts: int           # current count of NO contracts held
-    _exiting: bool = field(default=False, repr=False)  # lock to prevent double exits
     original_contracts: int     # original count (for tracking partial exits)
     city_date: str
     exit_stage: int = 0        # 0=none, 1=cut_some, 2=cut_heavy, 3=full_exit
+    _exiting: bool = field(default=False, repr=False)  # lock to prevent double exits
 
 
 class ExitManager:
