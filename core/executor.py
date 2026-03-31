@@ -85,6 +85,9 @@ class OrderExecutor:
         if fill_cost == 0 and filled_count > 0:
             fill_cost = filled_count * no_ask
 
+        # Include fees in total cost (affects P&L accuracy)
+        fill_cost_with_fees = fill_cost + total_fees
+
         final_status = "matched" if filled_count > 0 else status
         actual_fill_price = fill_cost / filled_count if filled_count > 0 else no_ask
 
@@ -96,7 +99,7 @@ class OrderExecutor:
             "intended_price": no_ask,
             "fill_price": actual_fill_price,
             "count": filled_count,
-            "cost_usd": fill_cost,
+            "cost_usd": fill_cost_with_fees,
             "status": final_status,
             "question": market.get("question", ""),
             "close_time": market.get("close_time"),
@@ -111,8 +114,8 @@ class OrderExecutor:
                 "event_ticker": market.get("event_ticker", ""),
                 "question": market.get("question", ""),
                 "no_contracts": filled_count,
-                "no_cost": fill_cost,
-                "entry_price_no": actual_fill_price,
+                "no_cost": fill_cost_with_fees,
+                "entry_price_no": fill_cost_with_fees / filled_count,
                 "city_date": market.get("city_date", ""),
                 "close_time": market.get("close_time"),
             })
@@ -171,16 +174,18 @@ class OrderExecutor:
         # Even a limit order might partially fill immediately
         filled_count = parsed["fill_count"]
         fill_cost = parsed["taker_fill_cost"] + parsed["maker_fill_cost"]
+        total_fees = parsed["taker_fees"] + parsed["maker_fees"]
+        fill_cost_with_fees = fill_cost + total_fees
         remaining = parsed["remaining_count"]
 
         if filled_count > 0:
-            actual_fill_price = fill_cost / filled_count if fill_cost > 0 else bid_price
+            actual_fill_price = fill_cost_with_fees / filled_count if fill_cost_with_fees > 0 else bid_price
             await self.db.upsert_position({
                 "ticker": ticker,
                 "event_ticker": market.get("event_ticker", ""),
                 "question": market.get("question", ""),
                 "no_contracts": filled_count,
-                "no_cost": fill_cost if fill_cost > 0 else filled_count * bid_price,
+                "no_cost": fill_cost_with_fees if fill_cost_with_fees > 0 else filled_count * bid_price,
                 "entry_price_no": actual_fill_price,
                 "city_date": market.get("city_date", ""),
                 "close_time": market.get("close_time"),
@@ -206,9 +211,9 @@ class OrderExecutor:
             "side": "no",
             "action": "buy",
             "intended_price": bid_price,
-            "fill_price": (fill_cost / filled_count) if filled_count > 0 and fill_cost > 0 else None,
+            "fill_price": (fill_cost_with_fees / filled_count) if filled_count > 0 and fill_cost_with_fees > 0 else None,
             "count": filled_count,
-            "cost_usd": fill_cost,
+            "cost_usd": fill_cost_with_fees,
             "status": "matched" if filled_count > 0 and remaining == 0 else
                       "partial" if filled_count > 0 and remaining > 0 else "resting",
             "question": market.get("question", ""),
@@ -265,13 +270,15 @@ class OrderExecutor:
         api_status = parsed["status"]
         filled_count = parsed["fill_count"]
         fill_cost = parsed["taker_fill_cost"] + parsed["maker_fill_cost"]
+        total_fees = parsed["taker_fees"] + parsed["maker_fees"]
+        fill_cost_with_fees = fill_cost + total_fees
         remaining = parsed["remaining_count"]
 
         if filled_count == 0:
             return None
 
         oo = matching_order
-        actual_price = fill_cost / filled_count if fill_cost > 0 else float(oo["price"])
+        actual_price = fill_cost_with_fees / filled_count if fill_cost_with_fees > 0 else float(oo["price"])
 
         # Mark order as filled/partial
         if api_status == "executed" or remaining == 0:
@@ -285,7 +292,7 @@ class OrderExecutor:
             "event_ticker": "",
             "question": oo.get("question"),
             "no_contracts": filled_count,
-            "no_cost": fill_cost if fill_cost > 0 else filled_count * float(oo["price"]),
+            "no_cost": fill_cost_with_fees if fill_cost_with_fees > 0 else filled_count * float(oo["price"]),
             "entry_price_no": actual_price,
             "city_date": oo.get("city_date", ""),
             "close_time": oo.get("close_time"),
@@ -299,7 +306,7 @@ class OrderExecutor:
             "intended_price": float(oo["price"]),
             "fill_price": actual_price,
             "count": filled_count,
-            "cost_usd": fill_cost if fill_cost > 0 else filled_count * float(oo["price"]),
+            "cost_usd": fill_cost_with_fees if fill_cost_with_fees > 0 else filled_count * float(oo["price"]),
             "status": "matched" if remaining == 0 else "partial",
             "question": oo.get("question"),
             "close_time": oo.get("close_time"),
@@ -344,9 +351,11 @@ class OrderExecutor:
             api_status = parsed["status"]
             filled_count = parsed["fill_count"]
             fill_cost = parsed["taker_fill_cost"] + parsed["maker_fill_cost"]
+            total_fees = parsed["taker_fees"] + parsed["maker_fees"]
+            fill_cost_with_fees = fill_cost + total_fees
 
             if filled_count > 0 and api_status == "executed":
-                actual_price = fill_cost / filled_count if fill_cost > 0 else float(oo["price"])
+                actual_price = fill_cost_with_fees / filled_count if fill_cost_with_fees > 0 else float(oo["price"])
 
                 await self.db.update_open_order(order_id, "filled", filled_count)
 
@@ -355,7 +364,7 @@ class OrderExecutor:
                     "event_ticker": "",
                     "question": oo.get("question"),
                     "no_contracts": filled_count,
-                    "no_cost": fill_cost if fill_cost > 0 else filled_count * float(oo["price"]),
+                    "no_cost": fill_cost_with_fees if fill_cost_with_fees > 0 else filled_count * float(oo["price"]),
                     "entry_price_no": actual_price,
                     "city_date": oo.get("city_date", ""),
                     "close_time": oo.get("close_time"),
@@ -369,7 +378,7 @@ class OrderExecutor:
                     "intended_price": float(oo["price"]),
                     "fill_price": actual_price,
                     "count": filled_count,
-                    "cost_usd": fill_cost if fill_cost > 0 else filled_count * float(oo["price"]),
+                    "cost_usd": fill_cost_with_fees if fill_cost_with_fees > 0 else filled_count * float(oo["price"]),
                     "status": "matched",
                     "question": oo.get("question"),
                     "close_time": oo.get("close_time"),

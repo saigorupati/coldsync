@@ -178,6 +178,7 @@ class ExitManager:
         parsed = KalshiClient.parse_order_response(result)
         filled_count = parsed["fill_count"]
         fill_cost = parsed["taker_fill_cost"] + parsed["maker_fill_cost"]
+        total_fees = parsed["taker_fees"] + parsed["maker_fees"]
 
         if filled_count == 0:
             logger.warning("Exit order got no fills for %s (stage %d, no_price=%dc)",
@@ -185,8 +186,9 @@ class ExitManager:
             # Don't advance stage if we couldn't sell — will retry next evaluation
             return
 
-        # Actual sell price per contract (what we received)
-        actual_sell_price = fill_cost / filled_count if fill_cost > 0 else current_no_price
+        # Actual sell price per contract (what we received, after fees)
+        sell_proceeds = fill_cost - total_fees  # fees reduce what we get back
+        actual_sell_price = sell_proceeds / filled_count if filled_count > 0 else current_no_price
         realized_pnl = (actual_sell_price - pos.entry_price_no) * filled_count
         cost_removed = pos.entry_price_no * filled_count
 
