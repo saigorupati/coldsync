@@ -23,6 +23,7 @@ class MonitoredPosition:
     ticker: str
     entry_price_no: float      # price we paid per NO contract (e.g., 0.95)
     no_contracts: int           # current count of NO contracts held
+    _exiting: bool = field(default=False, repr=False)  # lock to prevent double exits
     original_contracts: int     # original count (for tracking partial exits)
     city_date: str
     exit_stage: int = 0        # 0=none, 1=cut_some, 2=cut_heavy, 3=full_exit
@@ -115,7 +116,7 @@ class ExitManager:
         current_no_price: 0.85 (we'd get 85c selling now)
         loss_pct: (0.95 - 0.85) / 0.95 = 10.5%
         """
-        if pos.no_contracts <= 0:
+        if pos.no_contracts <= 0 or pos._exiting:
             return
 
         loss_pct = (pos.entry_price_no - current_no_price) / pos.entry_price_no
@@ -129,6 +130,14 @@ class ExitManager:
 
     async def _execute_exit(self, pos: MonitoredPosition, cut_fraction: float,
                              stage: int, reason: str, current_no_price: float):
+        pos._exiting = True
+        try:
+            await self.__do_exit(pos, cut_fraction, stage, reason, current_no_price)
+        finally:
+            pos._exiting = False
+
+    async def __do_exit(self, pos: MonitoredPosition, cut_fraction: float,
+                        stage: int, reason: str, current_no_price: float):
         sell_count = max(1, int(pos.no_contracts * cut_fraction))
         if sell_count > pos.no_contracts:
             sell_count = pos.no_contracts
