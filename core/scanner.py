@@ -48,14 +48,11 @@ class LadderScanner:
         city_date = f"{city.code}|{dt.isoformat()}"
         logger.info("%s: %d markets found", city_date, len(markets))
 
-        # Batch fetch all orderbooks in a single API call
-        tickers = [m.ticker for m in markets]
-        orderbooks = await self.kalshi.get_orderbooks_batch(tickers)
-
+        # Fetch orderbooks sequentially (batch endpoint not available)
         bins = []
         for m in markets:
             try:
-                ob = orderbooks.get(m.ticker)
+                ob = await self.kalshi.get_orderbook(m.ticker)
                 enriched = self._enrich_market(m, ob)
                 if enriched is not None:
                     bins.append(enriched)
