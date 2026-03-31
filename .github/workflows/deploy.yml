@@ -1,0 +1,27 @@
+name: Deploy ColdSync
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /home/ec2-user/coldsync
+            git pull origin main
+            source .venv/bin/activate
+            pip install -q -r requirements.txt
+            cd web && npm ci --silent && npm run build && cd ..
+            DATABASE_URL="postgresql://coldsync:coldsync123@localhost:5432/coldsync" python scripts/init_db.py
+            sudo systemctl restart coldsync-bot
+            sudo systemctl restart coldsync-web
+            echo "Deploy complete at $(date)"
