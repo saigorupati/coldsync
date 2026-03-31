@@ -45,7 +45,7 @@ class TierClassifier:
 
         if hours_left > self.config.max_hours_before_resolution:
             if hours_left <= self.config.extended_hours_tier_d:
-                if no_price >= self.config.no_price_min and score >= 4.0:
+                if no_price >= self.config.no_price_min and score >= 3.0:
                     return Tier.D, ""
             return Tier.SKIP, f"hours_left {hours_left:.0f} > {self.config.max_hours_before_resolution}"
 

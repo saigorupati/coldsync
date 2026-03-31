@@ -34,31 +34,31 @@ class StrategyConfig:
 
     # --- No price filters ---
     no_price_min: float = 0.90
-    no_price_max: float = 0.98
+    no_price_max: float = 0.99       # Kalshi: tight bins at 0.985-0.99 still profitable
     no_price_sweet_min: float = 0.90
-    no_price_sweet_max: float = 0.94
+    no_price_sweet_max: float = 0.96  # Kalshi: sweet spot slightly wider
 
     # --- Distortion thresholds ---
-    prob_sum_min_excess: float = 0.01
-    prob_sum_strong_excess: float = 0.03
-    prob_sum_extreme_excess: float = 0.08
+    prob_sum_min_excess: float = 0.005  # Kalshi: smaller ladders (6 bins) → lower natural excess
+    prob_sum_strong_excess: float = 0.02
+    prob_sum_extreme_excess: float = 0.06
     neighbor_spread_ratio: float = 1.3
     neighbor_spread_extreme: float = 2.0
     center_of_mass_std_threshold: float = 1.5
 
     # --- Timing ---
-    max_hours_before_resolution: int = 24
+    max_hours_before_resolution: int = 30   # Kalshi: markets close ~midnight ET, morning scans see 25-30h
     extended_hours_tier_d: int = 72
     scan_interval_seconds: int = 60
 
     # --- Liquidity thresholds ---
-    max_spread: float = 0.06
-    preferred_spread: float = 0.04
+    max_spread: float = 0.08          # Kalshi: thinner books than Polymarket
+    preferred_spread: float = 0.05
     min_depth_multiplier_tier_a: float = 2.0
     min_depth_multiplier_other: float = 1.0
     max_book_take_pct: float = 0.50
     max_slippage: float = 0.02
-    min_market_volume: float = 500.0
+    min_market_volume: float = 200.0  # Kalshi: lower overall volume than Polymarket
     min_order_size: float = 5.0
 
     # --- Exit / Scale-out parameters (replaces hedge) ---
