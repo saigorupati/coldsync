@@ -102,7 +102,7 @@ class LadderScanner:
             "no_ask": no_ask,
             "spread": spread,
             "depth_2c_usd": depth_2c,
-            "close_time": "",  # will be enriched from market data if needed
+            "close_time": market.close_time,
             "volume": market.volume,
             "city_date": "",  # set by caller
             "temp_low": market.temp_low,

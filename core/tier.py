@@ -24,7 +24,10 @@ class TierClassifier:
         depth = m["depth_2c_usd"]
         volume = m["volume"]
 
-        close_time = datetime.fromisoformat(m["close_time"].replace("Z", "+00:00"))
+        raw_close = m.get("close_time", "")
+        if not raw_close:
+            return Tier.SKIP, "no_close_time"
+        close_time = datetime.fromisoformat(raw_close.replace("Z", "+00:00"))
         hours_left = (close_time - datetime.now(timezone.utc)).total_seconds() / 3600
 
         if no_price < 0.85:

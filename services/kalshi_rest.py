@@ -42,6 +42,7 @@ class KalshiMarket:
     is_open_high: bool
     status: str
     volume: int = 0
+    close_time: str = ""
 
 
 @dataclass
@@ -253,6 +254,7 @@ class KalshiClient:
                     is_open_high=is_open_high,
                     status=market_status,
                     volume=int(m.get("volume", 0)),
+                    close_time=m.get("close_time", ""),
                 ))
             except Exception as e:
                 logger.debug("Skipping market %s: %s", m.get("ticker", "?"), e)
@@ -312,6 +314,7 @@ class KalshiClient:
                     is_open_high=is_open_high,
                     status=market_status,
                     volume=int(m.get("volume", 0)),
+                    close_time=m.get("close_time", ""),
                 ))
             except Exception as e:
                 logger.debug("Skipping market %s: %s", m.get("ticker", "?"), e)
