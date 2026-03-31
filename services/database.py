@@ -2,6 +2,18 @@ import asyncpg
 from datetime import datetime, timedelta, timezone
 
 
+def _to_dt(val) -> datetime | None:
+    """Convert a string timestamp to datetime, or pass through if already datetime/None."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val
+    if isinstance(val, str):
+        # Handle 'Z' suffix for Python 3.11+ fromisoformat
+        return datetime.fromisoformat(val.replace("Z", "+00:00"))
+    return val
+
+
 class Database:
     def __init__(self, dsn: str):
         self.dsn = dsn
@@ -24,7 +36,7 @@ class Database:
         """, trade["ticker"], trade["type"], trade["side"], trade.get("action"),
             trade["intended_price"], trade.get("fill_price"), trade.get("count", 0),
             trade.get("cost_usd", 0), trade["status"], trade.get("question"),
-            trade.get("close_time"), trade.get("city_date"), trade.get("order_id"))
+            _to_dt(trade.get("close_time")), trade.get("city_date"), trade.get("order_id"))
 
     # --- Position tracking ---
     async def upsert_position(self, pos: dict):
@@ -41,7 +53,7 @@ class Database:
         """, pos["ticker"], pos.get("event_ticker"), pos.get("question"),
             pos.get("no_contracts", 0), pos.get("no_cost", 0),
             pos.get("entry_price_no", 0),
-            pos.get("city_date"), pos.get("close_time"))
+            pos.get("city_date"), _to_dt(pos.get("close_time")))
 
     async def get_open_positions(self) -> list[dict]:
         rows = await self.pool.fetch(
