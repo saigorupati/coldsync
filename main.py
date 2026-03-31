@@ -19,6 +19,8 @@ from core.risk import RiskController
 from core.exit_manager import ExitManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.getLogger("coldsync.kalshi").setLevel(logging.DEBUG)
+logging.getLogger("coldsync.scanner").setLevel(logging.DEBUG)
 logger = logging.getLogger("coldsync")
 
 

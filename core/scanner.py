@@ -18,20 +18,20 @@ class LadderScanner:
         dates = [(now + timedelta(days=d)).date() for d in range(0, 4)]
         active_cities = get_active_cities(self.config)
 
-        tasks = []
-        for city in active_cities:
-            for dt in dates:
-                tasks.append(self._fetch_event_ladder(city, dt))
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
         ladders = {}
-        for result in results:
-            if isinstance(result, Exception) or result is None:
-                continue
-            city_date, bins = result
-            if bins:
-                ladders[city_date] = bins
+
+        # Scan one city at a time to stay under rate limits
+        for city in active_cities:
+            # Fetch all dates for this city sequentially
+            for dt in dates:
+                try:
+                    result = await self._fetch_event_ladder(city, dt)
+                    if result is not None:
+                        city_date, bins = result
+                        if bins:
+                            ladders[city_date] = bins
+                except Exception as e:
+                    logger.warning("Scan error for %s on %s: %s", city.code, dt, e)
 
         return ladders
 
@@ -48,14 +48,15 @@ class LadderScanner:
         city_date = f"{city.code}|{dt.isoformat()}"
         logger.info("%s: %d markets found", city_date, len(markets))
 
-        enrich_tasks = [self._enrich_with_orderbook(m) for m in markets]
-        enriched = await asyncio.gather(*enrich_tasks, return_exceptions=True)
-
-        for b in enriched:
-            if isinstance(b, Exception):
-                logger.warning("Enrich exception in %s: %s", city_date, b)
-
-        bins = [b for b in enriched if b is not None and not isinstance(b, Exception)]
+        # Enrich sequentially to respect rate limits
+        bins = []
+        for m in markets:
+            try:
+                enriched = await self._enrich_with_orderbook(m)
+                if enriched is not None:
+                    bins.append(enriched)
+            except Exception as e:
+                logger.warning("Enrich exception in %s for %s: %s", city_date, m.ticker, e)
         if markets and not bins:
             logger.info("%s: %d markets found, 0 passed enrichment", city_date, len(markets))
         elif bins:
@@ -65,6 +66,7 @@ class LadderScanner:
     async def _enrich_with_orderbook(self, market) -> dict | None:
         ob = await self.kalshi.get_orderbook(market.ticker)
         if ob is None or not ob.yes_asks:
+            logger.debug("No orderbook/asks for %s", market.ticker)
             return None
 
         yes_ask = ob.best_ask()
@@ -77,6 +79,7 @@ class LadderScanner:
         no_ask = 1.0 - (yes_bid or yes_ask)  # cost to buy NO
 
         if no_mid < 0.03:
+            logger.debug("Skipping %s — no_mid %.3f too low", market.ticker, no_mid)
             return None
 
         spread = (yes_ask - yes_bid) if (yes_ask and yes_bid) else 0.10

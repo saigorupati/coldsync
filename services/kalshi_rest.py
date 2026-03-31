@@ -75,7 +75,7 @@ class KalshiClient:
         self._private_key = self._load_private_key(private_key_pem)
         self._last_request_time = 0.0
         self._http = httpx.AsyncClient(timeout=REQUEST_TIMEOUT)
-        self._semaphore = asyncio.Semaphore(5)  # max 5 concurrent requests
+        self._semaphore = asyncio.Semaphore(2)  # max 2 concurrent requests to stay under 10/s
 
     def _load_private_key(self, pem_or_path: str):
         if not pem_or_path or pem_or_path == "PLACEHOLDER_PEM":
@@ -395,6 +395,11 @@ class KalshiClient:
         try:
             data = await self._get(f"/markets/{ticker}/orderbook", params={"depth": depth})
             ob = data.get("orderbook", data)
+
+            logger.debug("Orderbook raw for %s: yes=%s no=%s",
+                         ticker,
+                         str(ob.get("yes", []))[:200],
+                         str(ob.get("no", []))[:200])
 
             yes_bids = [
                 {"price": self._parse_price(entry[0]), "quantity": entry[1]}
