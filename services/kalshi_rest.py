@@ -396,27 +396,65 @@ class KalshiClient:
     async def get_orderbook(self, ticker: str, depth: int = 10) -> Optional[KalshiOrderbook]:
         try:
             data = await self._get(f"/markets/{ticker}/orderbook", params={"depth": depth})
-            ob = data.get("orderbook", data)
 
-            logger.debug("Orderbook raw for %s: yes=%s no=%s",
-                         ticker,
-                         str(ob.get("yes", []))[:200],
-                         str(ob.get("no", []))[:200])
+            # Kalshi API returns orderbook_fp with yes_dollars/no_dollars
+            # Each entry is [price_string, quantity_string] in dollar decimals
+            ob_fp = data.get("orderbook_fp", {})
+            yes_dollars = ob_fp.get("yes_dollars", []) or []
+            no_dollars = ob_fp.get("no_dollars", []) or []
 
+            logger.debug("Orderbook for %s: %d yes levels, %d no levels",
+                         ticker, len(yes_dollars), len(no_dollars))
+
+            # yes_dollars = YES bids (people willing to buy YES at this price)
             yes_bids = [
-                {"price": self._parse_price(entry[0]), "quantity": entry[1]}
-                for entry in (ob.get("yes", []) or [])
+                {"price": float(entry[0]), "quantity": float(entry[1])}
+                for entry in yes_dollars
             ]
-            no_bids = ob.get("no", []) or []
+
+            # no_dollars = NO bids; to derive YES asks: yes_ask = 1.0 - no_bid
             yes_asks = [
-                {"price": 1.0 - self._parse_price(entry[0]), "quantity": entry[1]}
-                for entry in no_bids
+                {"price": 1.0 - float(entry[0]), "quantity": float(entry[1])}
+                for entry in no_dollars
             ]
 
             return KalshiOrderbook(ticker=ticker, yes_bids=yes_bids, yes_asks=yes_asks)
         except Exception as e:
             logger.error("Failed to get orderbook for %s: %s", ticker, e)
             return None
+
+    async def get_orderbooks_batch(self, tickers: list[str]) -> dict[str, KalshiOrderbook]:
+        """Fetch up to 100 orderbooks in a single API call."""
+        result = {}
+        if not tickers:
+            return result
+        try:
+            # Kalshi expects repeated tickers= params
+            params = [("tickers", t) for t in tickers[:100]]
+            # Build query string manually since httpx params dict doesn't support repeated keys
+            query = "&".join(f"tickers={t}" for t in tickers[:100])
+            data = await self._get(f"/markets/orderbooks?{query}")
+
+            for item in data.get("orderbooks", []):
+                ticker = item.get("ticker", "")
+                ob_fp = item.get("orderbook_fp", {})
+                yes_dollars = ob_fp.get("yes_dollars", []) or []
+                no_dollars = ob_fp.get("no_dollars", []) or []
+
+                yes_bids = [
+                    {"price": float(entry[0]), "quantity": float(entry[1])}
+                    for entry in yes_dollars
+                ]
+                yes_asks = [
+                    {"price": 1.0 - float(entry[0]), "quantity": float(entry[1])}
+                    for entry in no_dollars
+                ]
+                result[ticker] = KalshiOrderbook(ticker=ticker, yes_bids=yes_bids, yes_asks=yes_asks)
+
+            logger.debug("Batch orderbook: %d/%d tickers returned", len(result), len(tickers))
+        except Exception as e:
+            logger.error("Failed to get batch orderbooks: %s", e)
+        return result
 
     # ------------------------------------------------------------------
     # Portfolio

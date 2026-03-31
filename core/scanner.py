@@ -48,11 +48,15 @@ class LadderScanner:
         city_date = f"{city.code}|{dt.isoformat()}"
         logger.info("%s: %d markets found", city_date, len(markets))
 
-        # Enrich sequentially to respect rate limits
+        # Batch fetch all orderbooks in a single API call
+        tickers = [m.ticker for m in markets]
+        orderbooks = await self.kalshi.get_orderbooks_batch(tickers)
+
         bins = []
         for m in markets:
             try:
-                enriched = await self._enrich_with_orderbook(m)
+                ob = orderbooks.get(m.ticker)
+                enriched = self._enrich_market(m, ob)
                 if enriched is not None:
                     bins.append(enriched)
             except Exception as e:
@@ -63,8 +67,7 @@ class LadderScanner:
             logger.info("%s: %d/%d bins enriched", city_date, len(bins), len(markets))
         return city_date, bins
 
-    async def _enrich_with_orderbook(self, market) -> dict | None:
-        ob = await self.kalshi.get_orderbook(market.ticker)
+    def _enrich_market(self, market, ob) -> dict | None:
         if ob is None or not ob.yes_asks:
             logger.debug("No orderbook/asks for %s", market.ticker)
             return None
