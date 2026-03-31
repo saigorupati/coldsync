@@ -20,7 +20,7 @@ jobs:
             git pull origin main
             source .venv/bin/activate
             pip install -q -r requirements.txt
-            cd web && npm ci --silent && npm run build && cd ..
+            cd web && npm ci --silent && npx next build && cd ..
             DATABASE_URL="postgresql://coldsync:coldsync123@localhost:5432/coldsync" python scripts/init_db.py
             sudo systemctl restart coldsync-bot
             sudo systemctl restart coldsync-web
