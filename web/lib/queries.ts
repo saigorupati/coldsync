@@ -194,3 +194,101 @@ export async function getDailyPnl(): Promise<DailyPnl[]> {
     phase: parseInt(r.phase || '1'),
   }))
 }
+
+export async function getResolvedPositions(limit: number = 50): Promise<Position[]> {
+  const { rows } = await pool.query(
+    'SELECT * FROM positions WHERE resolved = TRUE ORDER BY resolved_at DESC LIMIT $1',
+    [limit]
+  )
+  return rows.map((r) => ({
+    ...r,
+    no_contracts: parseInt(r.no_contracts),
+    no_cost: num(r.no_cost),
+    entry_price_no: num(r.entry_price_no),
+    exit_stage: parseInt(r.exit_stage || '0'),
+    payout: r.payout ? num(r.payout) : null,
+    pnl: r.pnl ? num(r.pnl) : null,
+  }))
+}
+
+export async function getFilteredTrades(
+  filters: { type?: string; status?: string; city?: string },
+  limit: number = 100
+): Promise<Trade[]> {
+  const conditions: string[] = []
+  const params: unknown[] = []
+  let idx = 1
+
+  if (filters.type) {
+    conditions.push(`type LIKE $${idx}`)
+    params.push(`%${filters.type}%`)
+    idx++
+  }
+  if (filters.status) {
+    conditions.push(`status = $${idx}`)
+    params.push(filters.status)
+    idx++
+  }
+  if (filters.city) {
+    conditions.push(`city_date LIKE $${idx}`)
+    params.push(`${filters.city}|%`)
+    idx++
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+  params.push(limit)
+
+  const { rows } = await pool.query(
+    `SELECT * FROM trades ${where} ORDER BY timestamp DESC LIMIT $${idx}`,
+    params
+  )
+  return rows.map((r) => ({
+    ...r,
+    intended_price: num(r.intended_price),
+    fill_price: r.fill_price ? num(r.fill_price) : null,
+    count: parseInt(r.count || '0'),
+    cost_usd: num(r.cost_usd),
+  }))
+}
+
+export async function getTradeFilterOptions(): Promise<{
+  types: string[]
+  statuses: string[]
+  cities: string[]
+}> {
+  const [typesRes, statusesRes, citiesRes] = await Promise.all([
+    pool.query('SELECT DISTINCT type FROM trades ORDER BY type'),
+    pool.query('SELECT DISTINCT status FROM trades ORDER BY status'),
+    pool.query("SELECT DISTINCT split_part(city_date, '|', 1) AS city FROM trades WHERE city_date IS NOT NULL AND city_date != '' ORDER BY city"),
+  ])
+  return {
+    types: typesRes.rows.map((r) => r.type),
+    statuses: statusesRes.rows.map((r) => r.status),
+    cities: citiesRes.rows.map((r) => r.city),
+  }
+}
+
+export async function getResolvedStats(): Promise<{
+  total: number
+  wins: number
+  losses: number
+  totalPnl: number
+  winRate: number
+}> {
+  const { rows } = await pool.query(`
+    SELECT COUNT(*) AS total,
+           COUNT(*) FILTER (WHERE pnl >= 0) AS wins,
+           COUNT(*) FILTER (WHERE pnl < 0) AS losses,
+           COALESCE(SUM(pnl), 0) AS total_pnl
+    FROM positions WHERE resolved = TRUE
+  `)
+  const r = rows[0]
+  const total = parseInt(r.total)
+  return {
+    total,
+    wins: parseInt(r.wins),
+    losses: parseInt(r.losses),
+    totalPnl: num(r.total_pnl),
+    winRate: total > 0 ? parseInt(r.wins) / total : 0,
+  }
+}

@@ -67,3 +67,55 @@ export function exitStageLabel(stage: number): string {
   }
   return labels[stage] || `Stage ${stage}`
 }
+
+// Kalshi URL builder — constructs link to market page
+// Ticker format: KXHIGHNY-26MAR31-B74.5
+// URL format: https://kalshi.com/markets/kxhighny-26mar31
+export function kalshiMarketUrl(ticker: string): string {
+  // Extract event ticker (first two segments: KXHIGHNY-26MAR31)
+  const parts = ticker.split('-')
+  if (parts.length >= 2) {
+    const eventTicker = parts.slice(0, 2).join('-').toLowerCase()
+    return `https://kalshi.com/markets/${eventTicker}`
+  }
+  return `https://kalshi.com/markets/${ticker.toLowerCase()}`
+}
+
+// Badge color helpers for trade types
+export function typeColor(type: string): { bg: string; text: string } {
+  if (type.includes('tier_A')) return { bg: 'bg-blue-900/50', text: 'text-blue-400' }
+  if (type.includes('tier_B')) return { bg: 'bg-cyan-900/50', text: 'text-cyan-400' }
+  if (type.includes('tier_C')) return { bg: 'bg-purple-900/50', text: 'text-purple-400' }
+  if (type.includes('tier_D')) return { bg: 'bg-orange-900/50', text: 'text-orange-400' }
+  if (type.includes('exit')) return { bg: 'bg-yellow-900/50', text: 'text-yellow-400' }
+  if (type.includes('reconcile')) return { bg: 'bg-pink-900/50', text: 'text-pink-400' }
+  return { bg: 'bg-zinc-800', text: 'text-zinc-400' }
+}
+
+export function statusColor(status: string): { bg: string; text: string } {
+  switch (status) {
+    case 'matched': return { bg: 'bg-green-900/50', text: 'text-green-400' }
+    case 'resting': return { bg: 'bg-blue-900/50', text: 'text-blue-400' }
+    case 'partial': return { bg: 'bg-yellow-900/50', text: 'text-yellow-400' }
+    case 'dry_run': return { bg: 'bg-zinc-800', text: 'text-zinc-500' }
+    case 'error': return { bg: 'bg-red-900/50', text: 'text-red-400' }
+    case 'skipped': return { bg: 'bg-zinc-800', text: 'text-zinc-600' }
+    default: return { bg: 'bg-zinc-800', text: 'text-zinc-400' }
+  }
+}
+
+export function outcomeColor(outcome: string | null): string {
+  if (outcome === 'No') return 'text-green-400' // We profit on No
+  if (outcome === 'Yes') return 'text-red-400'
+  return 'text-zinc-400'
+}
+
+// Short label from question text
+export function shortQuestion(question: string): string {
+  if (!question) return '-'
+  // Try to extract temp range like "74° to 75°" or "82° or above"
+  const rangeMatch = question.match(/(\d+°\s*(?:to\s*\d+°|or\s+(?:above|below)))/i)
+  if (rangeMatch) return rangeMatch[1]
+  // Fallback: truncate
+  return question.length > 40 ? question.slice(0, 37) + '...' : question
+}

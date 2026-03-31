@@ -1,22 +1,31 @@
-import { getRiskState, getOpenPositionsCount, getTodayStats, getTotalPnl } from '@/lib/queries'
+import { getRiskState, getOpenPositionsCount, getTodayStats, getTotalPnl, getDailyPnl } from '@/lib/queries'
 import { formatUsd, formatPnl, pnlColor, phaseLabel } from '@/lib/format'
 import StatCard from './components/stat-card'
 import LocalTime from './components/local-time'
+import PnlChart from './pnl/pnl-chart'
 
 export const dynamic = 'force-dynamic'
 
 export default async function OverviewPage() {
-  const [risk, openCount, today, totalPnl] = await Promise.all([
+  const [risk, openCount, today, totalPnl, dailyData] = await Promise.all([
     getRiskState(),
     getOpenPositionsCount(),
     getTodayStats(),
     getTotalPnl(),
+    getDailyPnl(),
   ])
 
   const walletBal = risk?.wallet_balance ?? 0
   const freeCash = risk?.free_cash ?? 0
   const phase = risk?.phase ?? 1
   const scaleFactor = risk?.scale_factor ?? 1
+
+  const chartData = dailyData.map((d) => ({
+    date: new Date(d.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+    dailyPnl: d.daily_pnl,
+    cumulativePnl: d.cumulative_pnl,
+    balance: d.wallet_balance,
+  }))
 
   return (
     <div>
@@ -47,6 +56,14 @@ export default async function OverviewPage() {
           colorClass={today.wins > today.losses ? 'text-green-400' : today.losses > 0 ? 'text-red-400' : 'text-white'}
         />
       </div>
+
+      {/* Daily P&L Chart */}
+      {chartData.length > 0 && (
+        <div className="mt-8 bg-zinc-900 rounded-lg p-4 border border-zinc-800">
+          <h3 className="text-lg font-semibold mb-4">Daily P&L</h3>
+          <PnlChart data={chartData} />
+        </div>
+      )}
 
       {risk?.paused_until && new Date(risk.paused_until) > new Date() && (
         <div className="mt-6 p-4 bg-red-900/30 border border-red-800 rounded-lg">

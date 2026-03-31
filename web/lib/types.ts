@@ -106,3 +106,9 @@ export interface ScanResult {
   skip_reason: string | null
   scanned_at: string
 }
+
+export interface TradeFilters {
+  type?: string
+  status?: string
+  city?: string
+}
