@@ -40,9 +40,18 @@ class KalshiWebSocket:
         self._reconnect_delay = 5.0
         self._max_reconnect_delay = 60.0
 
-    def _load_private_key(self, pem: str):
-        if not pem or pem == "PLACEHOLDER_PEM":
+    def _load_private_key(self, pem_or_path: str):
+        if not pem_or_path or pem_or_path == "PLACEHOLDER_PEM":
             return None
+        import os
+        if os.path.isfile(pem_or_path):
+            try:
+                with open(pem_or_path, "r") as f:
+                    pem = f.read()
+            except Exception:
+                return None
+        else:
+            pem = pem_or_path
         pem = pem.replace("\\n", "\n")
         if not pem.strip().startswith("-----"):
             return None

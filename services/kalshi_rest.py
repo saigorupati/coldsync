@@ -108,7 +108,9 @@ class KalshiClient:
     def _sign_request(self, method: str, path: str) -> dict:
         timestamp_ms = str(int(time.time() * 1000))
         path_no_query = path.split("?")[0]
-        message = f"{timestamp_ms}{method.upper()}{path_no_query}".encode()
+        # Kalshi requires the FULL path (including /trade-api/v2) in the signature
+        full_path = "/trade-api/v2" + path_no_query
+        message = f"{timestamp_ms}{method.upper()}{full_path}".encode()
 
         if self._private_key is None:
             return {}
