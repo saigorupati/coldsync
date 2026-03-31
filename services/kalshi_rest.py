@@ -233,8 +233,8 @@ class KalshiClient:
         result = []
         for m in markets_raw:
             try:
-                yes_ask = self._parse_price(m.get("yes_ask") or m.get("yes_ask_price") or 0)
-                yes_bid = self._parse_price(m.get("yes_bid") or m.get("yes_bid_price") or 0)
+                yes_ask = self._parse_dollar_price(m, "yes_ask_dollars", "yes_ask")
+                yes_bid = self._parse_dollar_price(m, "yes_bid_dollars", "yes_bid")
                 subtitle = m.get("yes_sub_title") or m.get("subtitle") or ""
                 temp_low, temp_high, is_open_low, is_open_high = self._parse_bounds_from_market(m)
 
@@ -253,7 +253,7 @@ class KalshiClient:
                     is_open_low=is_open_low,
                     is_open_high=is_open_high,
                     status=market_status,
-                    volume=int(m.get("volume", 0)),
+                    volume=self._parse_volume(m),
                     close_time=m.get("close_time", ""),
                 ))
             except Exception as e:
@@ -297,8 +297,8 @@ class KalshiClient:
         result = []
         for m in filtered:
             try:
-                yes_ask = self._parse_price(m.get("yes_ask") or m.get("yes_ask_price") or 0)
-                yes_bid = self._parse_price(m.get("yes_bid") or m.get("yes_bid_price") or 0)
+                yes_ask = self._parse_dollar_price(m, "yes_ask_dollars", "yes_ask")
+                yes_bid = self._parse_dollar_price(m, "yes_bid_dollars", "yes_bid")
                 subtitle = m.get("yes_sub_title") or m.get("subtitle") or ""
                 temp_low, temp_high, is_open_low, is_open_high = self._parse_bounds_from_market(m)
 
@@ -313,7 +313,7 @@ class KalshiClient:
                     is_open_low=is_open_low,
                     is_open_high=is_open_high,
                     status=market_status,
-                    volume=int(m.get("volume", 0)),
+                    volume=self._parse_volume(m),
                     close_time=m.get("close_time", ""),
                 ))
             except Exception as e:
@@ -322,14 +322,33 @@ class KalshiClient:
 
         return result
 
-    def _parse_price(self, raw) -> float:
-        if raw is None:
-            return 0.0
-        if isinstance(raw, str):
-            raw = float(raw)
-        if isinstance(raw, (int, float)) and raw > 1:
-            return raw / 100.0
-        return float(raw)
+    def _parse_volume(self, raw: dict) -> int:
+        """Parse volume from volume_fp (string) or legacy volume (int)."""
+        vfp = raw.get("volume_fp")
+        if vfp is not None:
+            try:
+                return int(float(vfp))
+            except (ValueError, TypeError):
+                pass
+        return int(raw.get("volume", 0))
+
+    def _parse_dollar_price(self, raw: dict, field: str, legacy_field: str = "") -> float:
+        """Parse a dollar-string price field, falling back to legacy cents field."""
+        val = raw.get(field)
+        if val is not None:
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                pass
+        if legacy_field:
+            val = raw.get(legacy_field)
+            if val is not None:
+                try:
+                    v = float(val)
+                    return v / 100.0 if v > 1 else v
+                except (ValueError, TypeError):
+                    pass
+        return 0.0
 
     def _parse_temp_range(self, subtitle: str) -> tuple[Optional[float], Optional[float], bool, bool]:
         s = subtitle.strip().replace("\u00b0", "°").replace("\u02da", "°")

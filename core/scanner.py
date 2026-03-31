@@ -46,7 +46,8 @@ class LadderScanner:
             return None
 
         city_date = f"{city.code}|{dt.isoformat()}"
-        logger.info("%s: %d markets found", city_date, len(markets))
+        logger.info("%s: %d markets found (vols: %s)", city_date, len(markets),
+                    [f"{m.ticker}={m.volume}" for m in markets])
 
         # Fetch orderbooks sequentially (batch endpoint not available)
         bins = []
