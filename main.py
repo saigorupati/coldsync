@@ -101,6 +101,9 @@ async def main():
     # Load persisted state
     await risk.load_frozen_cities()
 
+    # Fix any fully-exited positions that weren't marked resolved
+    await db.fix_orphaned_exits()
+
     # Reconcile DB with Kalshi portfolio on startup (prevents duplicate orders)
     kalshi_positions = await kalshi.get_positions()
     db_positions = await db.get_open_positions()
@@ -144,6 +147,16 @@ async def main():
             int(p["no_contracts"]), p.get("city_date", ""),
             int(p.get("exit_stage", 0)),
         )
+
+    # Reload YES flip positions for monitoring (survive restarts)
+    open_yes = await db.get_open_yes_positions()
+    for yp in open_yes:
+        if int(yp.get("yes_contracts", 0)) > 0:
+            await exit_mgr.register_yes_position(
+                yp["ticker"], float(yp["entry_price_yes"]),
+                int(yp["yes_contracts"]), yp.get("city_date", ""),
+                float(yp.get("no_loss_amount", 0)),
+            )
 
     start_bal = await positions.wallet_balance()
     logger.info("Bot started. Phase %d. Balance: $%.2f. Dry run: %s. Env: %s",

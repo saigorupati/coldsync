@@ -122,6 +122,25 @@ CREATE TABLE IF NOT EXISTS exits (
     reason TEXT,
     timestamp TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS yes_positions (
+    ticker TEXT PRIMARY KEY,
+    origin_ticker TEXT NOT NULL,
+    event_ticker TEXT,
+    question TEXT,
+    yes_contracts INTEGER DEFAULT 0,
+    yes_cost NUMERIC(12,4) DEFAULT 0,
+    entry_price_yes NUMERIC(8,4) DEFAULT 0,
+    city_date TEXT,
+    close_time TIMESTAMPTZ,
+    no_loss_amount NUMERIC(12,4),
+    resolved BOOLEAN DEFAULT FALSE,
+    resolved_outcome TEXT,
+    payout NUMERIC(12,4),
+    pnl NUMERIC(12,4),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    resolved_at TIMESTAMPTZ
+);
 """
 
 

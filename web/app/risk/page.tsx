@@ -21,6 +21,7 @@ const RISK_PARAMS = [
   { label: 'Exit Stage 1', value: '-20% -> sell 33%' },
   { label: 'Exit Stage 2', value: '-30% -> sell 66%' },
   { label: 'Exit Stage 3', value: '-40% -> full exit' },
+  { label: 'Stage 4: YES Flip', value: '-50% -> buy YES (50% of loss, max $10)' },
 ]
 
 export default async function RiskPage() {

@@ -36,9 +36,40 @@ export async function getOpenPositions(): Promise<Position[]> {
 
 export async function getOpenPositionsCount(): Promise<number> {
   const { rows } = await pool.query(
-    'SELECT COUNT(*) as count FROM positions WHERE resolved = FALSE'
+    'SELECT COUNT(*) as count FROM positions WHERE resolved = FALSE AND no_contracts > 0'
   )
   return parseInt(rows[0].count)
+}
+
+export async function getOpenYesPositions(): Promise<any[]> {
+  const { rows } = await pool.query(
+    'SELECT * FROM yes_positions WHERE resolved = FALSE ORDER BY created_at DESC'
+  )
+  return rows.map((r) => ({
+    ...r,
+    yes_contracts: parseInt(r.yes_contracts),
+    yes_cost: num(r.yes_cost),
+    entry_price_yes: num(r.entry_price_yes),
+    no_loss_amount: num(r.no_loss_amount),
+    payout: r.payout ? num(r.payout) : null,
+    pnl: r.pnl ? num(r.pnl) : null,
+  }))
+}
+
+export async function getResolvedYesPositions(limit: number = 50): Promise<any[]> {
+  const { rows } = await pool.query(
+    'SELECT * FROM yes_positions WHERE resolved = TRUE ORDER BY resolved_at DESC LIMIT $1',
+    [limit]
+  )
+  return rows.map((r) => ({
+    ...r,
+    yes_contracts: parseInt(r.yes_contracts),
+    yes_cost: num(r.yes_cost),
+    entry_price_yes: num(r.entry_price_yes),
+    no_loss_amount: num(r.no_loss_amount),
+    payout: r.payout ? num(r.payout) : null,
+    pnl: r.pnl ? num(r.pnl) : null,
+  }))
 }
 
 export async function getTodayStats(): Promise<TodayStats> {
@@ -70,11 +101,18 @@ export async function getTodayStats(): Promise<TodayStats> {
 }
 
 export async function getTotalPnl(): Promise<number> {
-  const [resolRes, exitRes] = await Promise.all([
+  // positions.pnl now includes exit P&L (added at resolution time)
+  // Only add exit P&L for positions that are NOT yet resolved (still open with partial exits)
+  const [resolRes, openExitRes] = await Promise.all([
     pool.query('SELECT COALESCE(SUM(pnl), 0) AS total FROM positions WHERE resolved = TRUE'),
-    pool.query('SELECT COALESCE(SUM(realized_pnl), 0) AS total FROM exits'),
+    pool.query(`
+      SELECT COALESCE(SUM(e.realized_pnl), 0) AS total
+      FROM exits e
+      JOIN positions p ON e.ticker = p.ticker
+      WHERE p.resolved = FALSE
+    `),
   ])
-  return num(resolRes.rows[0].total) + num(exitRes.rows[0].total)
+  return num(resolRes.rows[0].total) + num(openExitRes.rows[0].total)
 }
 
 export async function getRecentTrades(limit: number = 50): Promise<Trade[]> {
@@ -131,9 +169,9 @@ export async function getPerformanceStats(): Promise<PerformanceStats> {
     `),
     pool.query(`
       SELECT COUNT(*) AS total,
-             COUNT(*) FILTER (WHERE pnl >= 0) AS wins,
-             COUNT(*) FILTER (WHERE pnl < 0) AS losses
-      FROM positions WHERE resolved = TRUE AND no_contracts > 0
+             COUNT(*) FILTER (WHERE resolved_outcome = 'No') AS wins,
+             COUNT(*) FILTER (WHERE resolved_outcome = 'Yes') AS losses
+      FROM positions WHERE resolved = TRUE AND resolved_outcome IN ('No', 'Yes')
     `),
     pool.query(`
       SELECT EXTRACT(DAY FROM NOW() - started_at)::int AS days
@@ -144,9 +182,13 @@ export async function getPerformanceStats(): Promise<PerformanceStats> {
     `),
   ])
 
-  const exitPnlRes = await pool.query(
-    'SELECT COALESCE(SUM(realized_pnl), 0) AS total FROM exits'
-  )
+  // Only count exit P&L for positions still open (resolved positions already include it)
+  const exitPnlRes = await pool.query(`
+    SELECT COALESCE(SUM(e.realized_pnl), 0) AS total
+    FROM exits e
+    JOIN positions p ON e.ticker = p.ticker
+    WHERE p.resolved = FALSE
+  `)
 
   const totalPnl = num(pnlRes.rows[0].resolution_pnl) + num(exitPnlRes.rows[0].total)
   const total = parseInt(winRateRes.rows[0].total)
@@ -272,23 +314,28 @@ export async function getResolvedStats(): Promise<{
   total: number
   wins: number
   losses: number
+  exited: number
   totalPnl: number
   winRate: number
 }> {
   const { rows } = await pool.query(`
     SELECT COUNT(*) AS total,
-           COUNT(*) FILTER (WHERE pnl >= 0) AS wins,
-           COUNT(*) FILTER (WHERE pnl < 0) AS losses,
+           COUNT(*) FILTER (WHERE resolved_outcome = 'No') AS wins,
+           COUNT(*) FILTER (WHERE resolved_outcome = 'Yes') AS losses,
+           COUNT(*) FILTER (WHERE resolved_outcome = 'Exited') AS exited,
            COALESCE(SUM(pnl), 0) AS total_pnl
     FROM positions WHERE resolved = TRUE
   `)
   const r = rows[0]
   const total = parseInt(r.total)
+  const exited = parseInt(r.exited)
+  const settledTotal = total - exited  // Only count settled markets for win rate
   return {
     total,
     wins: parseInt(r.wins),
     losses: parseInt(r.losses),
+    exited,
     totalPnl: num(r.total_pnl),
-    winRate: total > 0 ? parseInt(r.wins) / total : 0,
+    winRate: settledTotal > 0 ? parseInt(r.wins) / settledTotal : 0,
   }
 }

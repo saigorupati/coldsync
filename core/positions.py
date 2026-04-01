@@ -30,7 +30,9 @@ class PositionManager:
         return bal
 
     async def total_unresolved(self) -> float:
-        return await self.db.total_unresolved_exposure()
+        no_exposure = await self.db.total_unresolved_exposure()
+        yes_exposure = await self.db.total_yes_exposure()
+        return no_exposure + yes_exposure
 
     async def market_exposure(self, ticker: str) -> float:
         return await self.db.get_market_exposure(ticker)
@@ -47,6 +49,10 @@ class PositionManager:
         """
         resolved = []
         open_positions = await self.db.get_open_positions()
+
+        # Skip positions with 0 contracts — these are fully exited
+        # and should already be resolved by exit_manager
+        open_positions = [p for p in open_positions if int(p.get("no_contracts", 0)) > 0]
 
         # Batch check: first try WS position data (instant, no API calls)
         ws_checked = set()
@@ -73,10 +79,13 @@ class PositionManager:
                         payout = 0.0
 
                     # Use our tracked cost for P&L (includes fees)
-                    pnl = payout - cost
+                    # Also include P&L from any partial exits
+                    resolution_pnl = payout - cost
+                    exit_pnl = await self.db.get_total_exit_pnl(ticker)
+                    pnl = resolution_pnl + exit_pnl
 
-                    logger.info("WS settlement detected: %s → %s, pnl=$%.2f (kalshi_rpnl=$%.2f)",
-                                ticker, outcome, pnl, kalshi_rpnl)
+                    logger.info("WS settlement detected: %s → %s, resolution_pnl=$%.2f, exit_pnl=$%.2f, total_pnl=$%.2f (kalshi_rpnl=$%.2f)",
+                                ticker, outcome, resolution_pnl, exit_pnl, pnl, kalshi_rpnl)
 
                     await self.db.resolve_position(ticker, outcome, payout, pnl)
                     resolved.append({
@@ -118,7 +127,13 @@ class PositionManager:
 
             # If outcome is "No", our NO contracts pay out $1 each
             payout = float(no_contracts) if outcome == "No" else 0.0
-            pnl = payout - cost
+            # Include P&L from any partial exits
+            resolution_pnl = payout - cost
+            exit_pnl = await self.db.get_total_exit_pnl(ticker)
+            pnl = resolution_pnl + exit_pnl
+
+            logger.info("REST settlement: %s → %s, resolution_pnl=$%.2f, exit_pnl=$%.2f, total_pnl=$%.2f",
+                        ticker, outcome, resolution_pnl, exit_pnl, pnl)
 
             await self.db.resolve_position(ticker, outcome, payout, pnl)
 
@@ -133,5 +148,79 @@ class PositionManager:
             })
 
             await self.tg.send_resolution_alert(pos, outcome, payout, pnl)
+
+        # --- YES flip position resolutions ---
+        yes_positions = await self.db.get_open_yes_positions()
+        yes_positions = [p for p in yes_positions if int(p.get("yes_contracts", 0)) > 0]
+
+        for ypos in yes_positions:
+            ticker = ypos["ticker"]
+
+            # Check WS first
+            if self.ws and hasattr(self.ws, 'position_data'):
+                ws_pos = self.ws.position_data.get(ticker)
+                if ws_pos and ws_pos["position"] == 0:
+                    yes_contracts = int(ypos.get("yes_contracts", 0))
+                    cost = float(ypos.get("yes_cost", 0))
+                    kalshi_rpnl = ws_pos.get("realized_pnl_dollars", 0)
+
+                    if kalshi_rpnl > 0:
+                        outcome = "Yes"
+                        payout = float(yes_contracts)  # $1 each
+                    else:
+                        outcome = "No"
+                        payout = 0.0
+
+                    pnl = payout - cost
+                    logger.info("WS YES settlement: %s → %s, pnl=$%.2f", ticker, outcome, pnl)
+
+                    await self.db.resolve_yes_position(ticker, outcome, payout, pnl)
+                    resolved.append({
+                        "ticker": ticker,
+                        "question": ypos.get("question", ""),
+                        "outcome": f"YES Flip: {outcome}",
+                        "payout": payout,
+                        "cost": cost,
+                        "pnl": pnl,
+                        "city_date": ypos.get("city_date", ""),
+                    })
+                    await self.tg.send_yes_resolution_alert(ypos, outcome, payout, pnl)
+                    self.ws.position_data.pop(ticker, None)
+                    continue
+
+            # REST fallback
+            market = await self.kalshi.get_market(ticker)
+            if market is None:
+                continue
+
+            status = (market.get("status", "") or "").lower()
+            if status not in ("closed", "settled"):
+                continue
+
+            result = market.get("result", "")
+            if result not in ("yes", "no"):
+                continue
+
+            outcome = result.capitalize()
+            yes_contracts = int(ypos.get("yes_contracts", 0))
+            cost = float(ypos.get("yes_cost", 0))
+
+            # YES contracts pay $1 if outcome is Yes, $0 if No
+            payout = float(yes_contracts) if outcome == "Yes" else 0.0
+            pnl = payout - cost
+
+            logger.info("REST YES settlement: %s → %s, pnl=$%.2f", ticker, outcome, pnl)
+
+            await self.db.resolve_yes_position(ticker, outcome, payout, pnl)
+            resolved.append({
+                "ticker": ticker,
+                "question": ypos.get("question", ""),
+                "outcome": f"YES Flip: {outcome}",
+                "payout": payout,
+                "cost": cost,
+                "pnl": pnl,
+                "city_date": ypos.get("city_date", ""),
+            })
+            await self.tg.send_yes_resolution_alert(ypos, outcome, payout, pnl)
 
         return resolved

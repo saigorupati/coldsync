@@ -83,8 +83,13 @@ class DiscordService:
 
     async def send_exit_alert(self, ticker: str, stage: int, contracts_sold: int,
                                sell_price: float, entry_price: float, pnl: float, reason: str):
-        stage_labels = {1: "Cut Some (10%)", 2: "Cut Heavy (20%)", 3: "Full Exit (30%)"}
-        color = 0xF59E0B if stage < 3 else 0xEF4444
+        stage_labels = {
+            1: "Cut Some (20%)",
+            2: "Cut Heavy (30%)",
+            3: "Full Exit (40%)",
+            4: "YES Flip Stop-Loss",
+        }
+        color = 0xF59E0B if stage < 3 else 0xEF4444 if stage == 3 else 0xA855F7
 
         embed = {
             "title": f"Exit Stage {stage}",
@@ -128,6 +133,64 @@ class DiscordService:
             {"name": "Cost", "value": f"${cost:.2f}", "inline": True},
             {"name": "Payout", "value": f"${payout:.2f}", "inline": True},
             {"name": "P&L", "value": f"**${pnl:+.2f}**", "inline": True},
+        ])
+
+        embed = {
+            "title": title,
+            "color": color,
+            "fields": fields,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "footer": {"text": "ColdSync"},
+        }
+        await self._send_embed(embed)
+
+    async def send_yes_flip_alert(self, ticker: str, yes_contracts: int,
+                                    yes_price: float, no_loss: float,
+                                    spend: float, city_date: str):
+        fields = [
+            {"name": "Ticker", "value": f"`{ticker}`", "inline": False},
+            {"name": "YES Contracts", "value": str(yes_contracts), "inline": True},
+            {"name": "YES Price", "value": f"{yes_price * 100:.1f}c", "inline": True},
+            {"name": "Spend", "value": f"${spend:.2f}", "inline": True},
+            {"name": "NO Loss", "value": f"${no_loss:.2f}", "inline": True},
+            {"name": "Potential Payout", "value": f"${yes_contracts:.2f}", "inline": True},
+        ]
+        if city_date:
+            parts = city_date.split("|") if "|" in city_date else [city_date, ""]
+            fields.insert(1, {"name": "City", "value": parts[0], "inline": True})
+
+        embed = {
+            "title": "Stage 4: YES Flip",
+            "color": 0xA855F7,  # purple
+            "fields": fields,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "footer": {"text": "ColdSync"},
+        }
+        await self._send_embed(embed)
+
+    async def send_yes_resolution_alert(self, ypos: dict, outcome: str, payout: float, pnl: float):
+        is_win = pnl >= 0
+        title = f"YES Flip {'Win' if is_win else 'Loss'} — {outcome}"
+        color = 0x22C55E if is_win else 0xEF4444
+        city_date = ypos.get("city_date", "")
+        yes_contracts = int(ypos.get("yes_contracts", 0))
+        cost = float(ypos.get("yes_cost", 0))
+        no_loss = float(ypos.get("no_loss_amount", 0))
+
+        fields = [
+            {"name": "Ticker", "value": f"`{ypos.get('ticker', '')}`", "inline": False},
+        ]
+        if city_date:
+            parts = city_date.split("|") if "|" in city_date else [city_date, ""]
+            fields.append({"name": "City", "value": parts[0], "inline": True})
+
+        fields.extend([
+            {"name": "Outcome", "value": f"**{outcome}**", "inline": True},
+            {"name": "YES Contracts", "value": str(yes_contracts), "inline": True},
+            {"name": "Cost", "value": f"${cost:.2f}", "inline": True},
+            {"name": "Payout", "value": f"${payout:.2f}", "inline": True},
+            {"name": "YES P&L", "value": f"**${pnl:+.2f}**", "inline": True},
+            {"name": "Original NO Loss", "value": f"${no_loss:.2f}", "inline": True},
         ])
 
         embed = {

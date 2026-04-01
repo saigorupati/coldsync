@@ -1,5 +1,8 @@
 import asyncpg
+import logging
 from datetime import datetime, timedelta, timezone
+
+logger = logging.getLogger("coldsync.database")
 
 
 def _to_dt(val) -> datetime | None:
@@ -67,6 +70,14 @@ class Database:
                                  payout = $3, pnl = $4, resolved_at = NOW()
             WHERE ticker = $1
         """, ticker, outcome, payout, pnl)
+
+    async def get_total_exit_pnl(self, ticker: str) -> float:
+        """Get sum of realized P&L from all exits for a ticker."""
+        val = await self.pool.fetchval(
+            "SELECT COALESCE(SUM(realized_pnl), 0) FROM exits WHERE ticker = $1",
+            ticker
+        )
+        return float(val)
 
     async def get_positions_needing_monitoring(self) -> list[dict]:
         rows = await self.pool.fetch("""
@@ -151,23 +162,28 @@ class Database:
 
     async def no_bet_win_rate(self) -> float:
         row = await self.pool.fetchrow("""
-            SELECT COUNT(*) FILTER (WHERE pnl >= 0) AS wins,
+            SELECT COUNT(*) FILTER (WHERE resolved_outcome = 'No') AS wins,
                    COUNT(*) AS total
             FROM positions
-            WHERE resolved = TRUE AND no_contracts > 0
+            WHERE resolved = TRUE AND resolved_outcome IN ('No', 'Yes')
         """)
         if row and row["total"] > 0:
             return row["wins"] / row["total"]
         return 0.0
 
     async def total_pnl(self) -> float:
+        # positions.pnl already includes exit P&L for resolved positions
         resolution_pnl = await self.pool.fetchval(
             "SELECT COALESCE(SUM(pnl), 0) FROM positions WHERE resolved = TRUE"
         )
-        exit_pnl = await self.pool.fetchval(
-            "SELECT COALESCE(SUM(realized_pnl), 0) FROM exits"
-        )
-        return float(resolution_pnl) + float(exit_pnl)
+        # Only add exit P&L for positions still open (partial exits not yet resolved)
+        open_exit_pnl = await self.pool.fetchval("""
+            SELECT COALESCE(SUM(e.realized_pnl), 0)
+            FROM exits e
+            JOIN positions p ON e.ticker = p.ticker
+            WHERE p.resolved = FALSE
+        """)
+        return float(resolution_pnl) + float(open_exit_pnl)
 
     async def starting_balance(self) -> float:
         val = await self.pool.fetchval(
@@ -364,6 +380,105 @@ class Database:
             UPDATE open_orders SET status = 'cancelled', updated_at = NOW()
             WHERE ticker = $1 AND status = 'open'
         """, ticker)
+
+    # --- YES flip positions ---
+    async def upsert_yes_position(self, pos: dict):
+        await self.pool.execute("""
+            INSERT INTO yes_positions (ticker, origin_ticker, event_ticker, question,
+                                       yes_contracts, yes_cost, entry_price_yes,
+                                       city_date, close_time, no_loss_amount)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            ON CONFLICT (ticker) DO UPDATE SET
+                yes_contracts = yes_positions.yes_contracts + EXCLUDED.yes_contracts,
+                yes_cost = yes_positions.yes_cost + EXCLUDED.yes_cost,
+                entry_price_yes = (yes_positions.yes_cost + EXCLUDED.yes_cost)
+                    / NULLIF(yes_positions.yes_contracts + EXCLUDED.yes_contracts, 0)
+        """, pos["ticker"], pos["origin_ticker"], pos.get("event_ticker"),
+            pos.get("question"), pos.get("yes_contracts", 0),
+            pos.get("yes_cost", 0), pos.get("entry_price_yes", 0),
+            pos.get("city_date"), _to_dt(pos.get("close_time")),
+            pos.get("no_loss_amount", 0))
+
+    async def get_open_yes_positions(self) -> list[dict]:
+        rows = await self.pool.fetch(
+            "SELECT * FROM yes_positions WHERE resolved = FALSE"
+        )
+        return [dict(r) for r in rows]
+
+    async def get_yes_position(self, ticker: str) -> dict | None:
+        row = await self.pool.fetchrow(
+            "SELECT * FROM yes_positions WHERE ticker = $1", ticker
+        )
+        return dict(row) if row else None
+
+    async def resolve_yes_position(self, ticker: str, outcome: str, payout: float, pnl: float):
+        await self.pool.execute("""
+            UPDATE yes_positions SET resolved = TRUE, resolved_outcome = $2,
+                                     payout = $3, pnl = $4, resolved_at = NOW()
+            WHERE ticker = $1
+        """, ticker, outcome, payout, pnl)
+
+    async def update_yes_position_after_exit(self, ticker: str, contracts_removed: int, cost_removed: float):
+        await self.pool.execute("""
+            UPDATE yes_positions
+            SET yes_contracts = yes_contracts - $2,
+                yes_cost = yes_cost - $3
+            WHERE ticker = $1
+        """, ticker, contracts_removed, cost_removed)
+
+    async def total_yes_exposure(self) -> float:
+        val = await self.pool.fetchval(
+            "SELECT COALESCE(SUM(yes_cost), 0) FROM yes_positions WHERE resolved = FALSE"
+        )
+        return float(val)
+
+    # --- Cleanup ---
+    async def fix_orphaned_exits(self):
+        """Fix positions that were fully exited but have incorrect data.
+        Handles two cases:
+        1. Positions with no_contracts=0 and resolved=FALSE (never marked resolved)
+        2. Positions with no_contracts=0 and resolved=TRUE but pnl=0 when exits exist
+           (resolved by check_resolutions before exit P&L was included)
+        """
+        # Case 1: Unresolved but fully exited
+        unresolved = await self.pool.fetch("""
+            SELECT ticker FROM positions
+            WHERE resolved = FALSE AND no_contracts <= 0
+        """)
+        for row in unresolved:
+            ticker = row["ticker"]
+            exit_pnl = await self.get_total_exit_pnl(ticker)
+            await self.resolve_position(ticker, "Exited", 0.0, exit_pnl)
+            logger.info("Fixed unresolved fully-exited position: %s (exit_pnl=$%.2f)", ticker, exit_pnl)
+
+        # Case 2: Resolved with 0 contracts but P&L doesn't include exit P&L
+        # These were resolved by check_resolutions() before the fix,
+        # so pnl only reflects (payout - remaining_cost) = $0 for fully-exited positions
+        mismatched = await self.pool.fetch("""
+            SELECT p.ticker, p.pnl, p.resolved_outcome,
+                   COALESCE(SUM(e.realized_pnl), 0) AS exit_pnl
+            FROM positions p
+            LEFT JOIN exits e ON e.ticker = p.ticker
+            WHERE p.resolved = TRUE AND p.no_contracts <= 0
+            GROUP BY p.ticker, p.pnl, p.resolved_outcome
+            HAVING COALESCE(SUM(e.realized_pnl), 0) != 0
+               AND (p.pnl IS NULL OR ABS(p.pnl - COALESCE(SUM(e.realized_pnl), 0)) > 0.001)
+        """)
+        for row in mismatched:
+            ticker = row["ticker"]
+            exit_pnl = float(row["exit_pnl"])
+            old_pnl = float(row["pnl"] or 0)
+            # For fully-exited positions, total P&L = exit P&L (payout was 0 since we sold everything)
+            await self.pool.execute("""
+                UPDATE positions SET pnl = $2, resolved_outcome = 'Exited'
+                WHERE ticker = $1
+            """, ticker, exit_pnl)
+            logger.info("Fixed resolved fully-exited position: %s (old_pnl=$%.2f → exit_pnl=$%.2f)",
+                        ticker, old_pnl, exit_pnl)
+
+        total = len(unresolved) + len(mismatched)
+        if total:
+            logger.info("Fixed %d orphaned/mismatched fully-exited positions", total)
 
     # --- Init risk state ---
     async def init_risk_state(self, starting_balance: float):

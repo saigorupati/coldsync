@@ -64,6 +64,7 @@ export function exitStageLabel(stage: number): string {
     1: 'Cut 33%',
     2: 'Cut 66%',
     3: 'Full Exit',
+    4: 'YES Flip',
   }
   return labels[stage] || `Stage ${stage}`
 }
@@ -136,6 +137,7 @@ export function statusColor(status: string): { bg: string; text: string } {
 export function outcomeColor(outcome: string | null): string {
   if (outcome === 'No') return 'text-green-400' // We profit on No
   if (outcome === 'Yes') return 'text-red-400'
+  if (outcome === 'Exited') return 'text-yellow-400'
   return 'text-zinc-400'
 }
 

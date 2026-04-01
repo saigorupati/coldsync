@@ -67,6 +67,15 @@ class StrategyConfig:
     exit_down_30_full_exit: bool = True       # fully exit at -40% (stage 3)
     exit_check_interval_seconds: float = 5.0  # polling fallback when WS down
 
+    # --- Stage 4: YES Flip (reversal after full NO exit) ---
+    yes_flip_enabled: bool = True            # enable YES flip after full NO exit
+    yes_flip_trigger_loss_pct: float = 0.50  # trigger when NO dropped 50%+ from entry
+    yes_flip_loss_fraction: float = 0.50     # spend up to 50% of realized NO loss
+    yes_flip_max_usd: float = 10.00          # absolute cap on YES flip spend
+    yes_flip_stop_loss_pct: float = 0.60     # sell YES if it drops 60% from entry
+    yes_flip_max_yes_price: float = 0.40     # don't buy YES above 40c (no value)
+    yes_flip_max_total_usd: float = 30.00    # global cap across all active YES flips
+
     # --- Risk controls ---
     loss_warning_count: int = 2
     loss_warning_size_reduction: float = 0.75
